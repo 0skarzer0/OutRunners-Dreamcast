@@ -11,6 +11,11 @@
  */
 #include "sound.h"
 
+/* Not the board's: a port playing both seats' sound through one pair of speakers (the Dreamcast's 2
+   PLAYERS) sets it, and screen 1's music parts (flags bit 0 clear: the effects' parts have it) are keyed on
+   in the middle, screen 2's silent, so one song plays; the effects stay on their seat's side */
+bool sound_seats_split;
+
 /* Takes one message off screen 1's MIDI queue each main loop pass, while screen_1_midi_count is not 0:
    its first byte (read_midi_byte_screen_1) is a new screen_1_midi_status, or a data byte under the last
    one; every part of screen 1 that plays (flags bit 7) on the message's channel gets it
@@ -1226,6 +1231,8 @@ void take_voice_screen_1(uint8_t velocity_then_timeout, uint16_t part)
 	write_pcm_register(pcm_register, value);
 	z80_block(31, 3);
 	value = 0x70u;
+	if (sound_seats_split && (MIDI_PART(part)->flags & 1u) == 0u)
+		value = 0x00u;    /* (the port's 2 PLAYERS: screen 1's music in the middle, sound_seats_split) */
 	pcm_register = 0u;
 	write_pcm_register(pcm_register, value);
 	z80_block(24, 3);
@@ -2853,6 +2860,8 @@ void take_voice_screen_2(uint8_t velocity_then_timeout, uint16_t part)
 	write_pcm_register(pcm_register, value);
 	z80_block(31, 3);
 	value = 0x90u;
+	if (sound_seats_split && (MIDI_PART(part)->flags & 1u) == 0u)
+		value = 0x80u;    /* (the port's 2 PLAYERS: screen 2's music silent, pan 8) */
 	pcm_register = 0u;
 	write_pcm_register(pcm_register, value);
 	z80_block(24, 3);

@@ -49,13 +49,16 @@ CFLAGS += -fno-fast-math
 CFLAGS += -DS32_SOUND_SILENT
 # render_emit: a frame stops building sprite textures 4 ms into its work (the rest wait a frame)
 CFLAGS += -DRT_BUILD_US=4000
+# Test images only (not a release): the stats overlay, hidden until X + Y, and the test switches
+# CFLAGS += -DDC_TEST_OVERLAY -DDC_TEST_OVERLAY_HIDDEN
 
-# The console build (console/: the PC version's menus, & KNUCKLES and OPTIONS) without 2 PLAYERS, VIDEO
-# and EXIT (a game device's menus), the network game (console_nonet.c in its place) and TIME ATTACK's
-# ghost (no memory for a run's recording); the extra palette is drawlist.c's, not the software video's.
+# The console build (console/: the PC version's menus: 2 PLAYERS with a second controller, & KNUCKLES and
+# OPTIONS) without VIDEO and EXIT (a game device's menus) and the network game (console_nonet.c in its
+# place); TIME ATTACK's ghost packed in memory (console/ghost.c ORUNNERS_GHOST_PACKED); the extra palette is
+# drawlist.c's, not the software video's.
 # (Changing these needs a clean build: the game's own sources read ORUNNERS_CONSOLE.)
-CFLAGS += -DORUNNERS_CONSOLE -DORUNNERS_HANDHELD -DORUNNERS_SYSTEM_EXIT -DORUNNERS_NO_NETWORK -DORUNNERS_NO_GHOST
-CFLAGS += -DS32_VIDEO_EXTRA_ELSEWHERE '-DORUNNERS_VERSION="0.2 DC"' -I$(ROOT)/console -I$(ROOT)/src
+CFLAGS += -DORUNNERS_CONSOLE -DORUNNERS_HANDHELD -DORUNNERS_TWO_PLAYERS -DORUNNERS_SYSTEM_EXIT -DORUNNERS_NO_NETWORK -DORUNNERS_GHOST_PACKED
+CFLAGS += -DS32_VIDEO_EXTRA_ELSEWHERE '-DORUNNERS_VERSION="0.3 DC"' -I$(ROOT)/console -I$(ROOT)/src
 
 # Dependency generation flags
 DEPFLAGS = -MMD -MP

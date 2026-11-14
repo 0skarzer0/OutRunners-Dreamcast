@@ -39,6 +39,12 @@ typedef struct rt_backend
 	/* optional (NULL: not drawn): a translucent quad of one colour over what is at or behind z, its alpha
 	   the colour's top byte (a shadow sprite's rectangle, the dimmed frame under a port's overlay) */
 	void (*tint)(float x0, float y0, float x1, float y1, float z, uint32_t argb);
+	/* optional (NULL: drawn as quad/quad_pal): a translucent textured quad, the texture's colours at 'alpha'
+	   (0-255) over what is at or behind z; bank -1 for an ARGB1555 texture */
+	void (*quad_alpha)(int handle, int bank, float x0, float y0, float x1, float y1,
+		float u0, float v0, float u1, float v1, float z, uint32_t mod, uint32_t add, int alpha);
+	/* optional (NULL: one screen): the screen the quads from here on are for (0 the left, 1 the right) */
+	void (*view)(int screen);
 } rt_backend;
 
 #define RT_PAL_BANKS 64
@@ -64,6 +70,8 @@ typedef struct rt_stats
 	uint32_t plane_cells_late;     /* tile cells whose update waits for a later frame */
 	uint32_t pal_sprites;          /* sprites drawn from paletted textures */
 	uint32_t pal_banks_full;       /* sprites that could not get a palette bank (drawn ARGB1555) */
+	uint32_t sprites_preview;      /* previews built (large sprites drawn from a coarse copy while theirs is built) */
+	uint32_t missing_px;           /* screen pixels of sprites not drawn at all (host checks) */
 	uint32_t phase_us[5];          /* palette scan, plane textures, backdrop + plane strips, sprites, shadows */
 } rt_stats;
 
@@ -78,5 +86,8 @@ void rt_frame(const dl_frame *frame, rt_stats *stats);
 void rt_set_build_limit(uint32_t us);
 extern rt_stats rt_prepare_stats;    /* (what the last rt_prepare counted) */
 void rt_prepare(const dl_frame *frame, bool (*keep_going)(void), uint32_t limit_us);
+/* The same for both screens' frames (2 PLAYERS: 'count' 2), each emitted after a backend view(screen) */
+void rt_prepare_n(const dl_frame *const *frames, int count, bool (*keep_going)(void), uint32_t limit_us);
+void rt_frame_n(const dl_frame *const *frames, int count, rt_stats *stats);
 
 #endif

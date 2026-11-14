@@ -1,4 +1,4 @@
-OutRunners for Dreamcast - version 0.2
+OutRunners for Dreamcast - version 0.3
 =====================================
 
 A native Dreamcast port of the OutRunners arcade game, built on the C reconstruction of the game
@@ -38,12 +38,38 @@ Menus
 -----
 The title screen has the PC version's menu (press Start):
     ARCADE                the arcade game, one player, free play
-    & KNUCKLES            CLASSIC (the arcade's game with a little more time), TIME ATTACK (no time
-                          limit; no ghost car in this version), FULL (all the stages in one race),
+    2 PLAYERS             both players in one race, on a split screen (shown when a second
+                          controller is plugged in)
+    & KNUCKLES            CLASSIC (the arcade's game with a little more time; a second player can
+                          join with Start), TIME ATTACK (no time limit, racing your fastest run as a
+                          see-through ghost car), FULL (all the stages in one race),
                           REVERSE (from a goal back to the start)
     OPTIONS               DIFFICULTY, TIME, VOLUME, SOUND TEST, STEERING (the stick's dead zone and
                           sensitivity, the D-pad's steering speed, vibration, an input test), FPS
 In a race, Start pauses: CONTINUE, RESTART or QUIT GAME.
+
+DIFFICULTY sets the traffic and rivals; TIME sets the seconds each stage gives you. If the arcade
+game is too hard to finish, turn TIME down (towards -) as well.
+
+2 PLAYERS
+---------
+The two races are shown side by side, each at the arcade's own 320 x 224, in a 640 x 480 picture
+with black bars above and below (480p on VGA; 480i on RGB/SCART and the other cables, in this mode
+only). The second player uses the controller in port B (or the next port with one), with the same
+controls. Player 1's music plays from both speakers; each player's engine and effects come from
+their own side (player 1 left, player 2 right). Large scenery is drawn at half resolution in this
+mode, so that two races fit in each frame. The picture changes mode as 2 PLAYERS starts and ends
+(a moment of black screen).
+
+Time Attack ghosts
+------------------
+TIME ATTACK records each run and races your fastest one again as a see-through car. After a run
+faster than any before, the game asks SAVE GHOST: SAVE TO VMU keeps it on the VMU (a file called
+ORGHOST, about 23 blocks for a five-minute run), DO NOT SAVE keeps it only until the console is
+switched off. A saved ghost is loaded when the game starts. To fit on a VMU the run is stored as the
+car's place once a second, with the moments in between filled in on a smooth curve, so the ghost can
+take a slightly rounder line than you did through a hard corner or a crash. Playing 2 PLAYERS clears
+the ghost from memory (it needs the room); TIME ATTACK reads the saved one from the VMU again.
 
 Controls (Dreamcast controller)
 -------------------------------
@@ -54,19 +80,28 @@ Controls (Dreamcast controller)
     A / B                 gear shift; in the menus A picks a line and B goes back
     Start                 start; picks a line in the menus; pauses a race
     Y                     music select
-    D-pad up / down       previous / next music
-A vibration pack shakes when the cabinet's wheel motor would (a crash, off the road).
+    D-pad up / down       previous / next music (every car can play all ten songs)
+    A + B + X + Y + Start soft reset: ends the game and goes back to the title
+A vibration pack shakes when the cabinet's wheel motor would (a crash, off the road). The second
+controller has the same controls for the second player.
 
 Saving
 ------
 Course records, the game's settings, the OPTIONS menu's settings and the bookkeeping are saved to the first VMU found, in a file
-called ORUNNERS (about 2 blocks), and loaded when the game starts. Records and settings are saved within
+called ORUNNERS (about 2 blocks), and loaded when the game starts. A Time Attack ghost you choose to
+save goes in a second file, ORGHOST. Records and settings are saved within
 ten seconds of changing; the rest at most every five minutes.
 
 Sound
 -----
-The arcade board serves two cabinets and sends each seat's sound to one speaker. Here both sides
-go to both speakers, so the game's music and effects are centred.
+The arcade board serves two cabinets and sends each seat's sound to one speaker. In one-player games
+both sides go to both speakers, so the game's music and effects are centred. 2 PLAYERS: see above.
+
+Niagara's mist
+--------------
+The arcade draws the mist at Niagara Falls on two frames out of four, which an arcade monitor
+blended into a haze; on a modern screen it flickers (it does in the PC version too). Here such
+sprites are drawn half see-through every frame instead.
 
 Getting it onto a Dreamcast
 ---------------------------
@@ -93,9 +128,11 @@ Dreamcast, that is a bug worth reporting.
 
 Status
 ------
-Version 0.2: the menus above are new and have been checked in the Flycast emulator; on a console
-they, the pause and the vibration are not yet tested. Version 0.1 was tested on a Dreamcast with
-GDEMU. Known gaps: in the busiest stretches the picture can drop a frame to keep the game and its
-music at full speed; distant scenery can appear a moment late, and large distant scenery can flicker
-on some stages (the pyramids, the snow); FM sound and sound LFOs are not reproduced; one player only
-(no 2 PLAYERS, no NETWORK); TIME ATTACK has no ghost car.
+Version 0.3: 2 PLAYERS, Time Attack ghosts saved to the VMU, Niagara's mist steady, large distant
+scenery drawn from a half-resolution copy while its full texture is built (no more blinking), soft
+reset. Played on a Dreamcast with GDEMU during development.
+Known gaps: in the busiest stretches the picture can drop a frame to keep the game and its music at
+full speed, and 2 PLAYERS is busier still (it can run below full speed); where a stage's colours
+change, the ground and road at the screen's edges can show blocks of the old colours for a moment;
+FM sound and sound LFOs are not reproduced; no NETWORK.
+

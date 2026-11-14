@@ -259,10 +259,19 @@ static void *reserve(uint8_t *list, size_t *used, size_t size, size_t bytes)
 	return p;
 }
 
+/* 2 PLAYERS (a 640 x 480 picture): both screens 1:1, side by side, in the middle of the picture's height */
+static float view_x, view_y = OY;
+static int screens_now = 1;
+static void q_view(int screen)
+{
+	view_x = screens_now > 1 && screen ? 320.0f : 0.0f;
+	view_y = screens_now > 1 ? (480.0f - 224.0f) / 2.0f : OY;
+}
+
 static void put_quad(pvr_vertex_t *v, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
 	float z, uint32_t argb, uint32_t oargb)
 {
-	const float X0 = x0 * SX, X1 = x1 * SX, Y0 = y0 * SY + OY, Y1 = y1 * SY + OY;
+	const float X0 = x0 * SX + view_x, X1 = x1 * SX + view_x, Y0 = y0 * SY + view_y, Y1 = y1 * SY + view_y;
 	const float px[4] = { X0, X0, X1, X1 }, py[4] = { Y1, Y0, Y1, Y0 };
 	const float pu[4] = { u0, u0, u1, u1 }, pv[4] = { v1, v0, v1, v0 };
 	for (int i = 0; i < 4; i++)
@@ -411,9 +420,35 @@ static void q_tint(float x0, float y0, float x1, float y1, float z, uint32_t arg
 	put_quad((pvr_vertex_t *)(p + sizeof(pvr_poly_hdr_t)), x0, y0, x1, y1, 0, 0, 0, 0, z, argb, 0);
 }
 
+/* a translucent textured quad (TIME ATTACK's ghost): the texture's colours at 'alpha' over what is behind */
+static void q_alpha(int t, int bank, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
+	float z, uint32_t mod, uint32_t add, int alpha)
+{
+	uint8_t *p = reserve(list_tr[cur], &used_tr, TR_BYTES, sizeof(pvr_poly_hdr_t) + 4 * sizeof(pvr_vertex_t));
+	if (!p) return;
+	pvr_poly_cxt_t cxt;
+	if (tex[t].pal4)
+		pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(bank < 0 ? 0 : bank) | PVR_TXRFMT_TWIDDLED,
+			tex[t].w, tex[t].h, tex[t].p, PVR_FILTER_NEAREST);
+	else
+		pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, tex[t].w, tex[t].h, tex[t].p,
+			PVR_FILTER_NEAREST);
+	cxt.gen.culling = PVR_CULLING_NONE;
+	cxt.gen.specular = PVR_SPECULAR_ENABLE;
+	cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
+	cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
+	cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+	cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+	pvr_poly_compile((pvr_poly_hdr_t *)p, &cxt);
+	mark_used(t);
+	const float iw = 1.0f / (float)tex[t].w, ih = 1.0f / (float)tex[t].h;
+	put_quad((pvr_vertex_t *)(p + sizeof(pvr_poly_hdr_t)), x0, y0, x1, y1, u0 * iw, v0 * ih, u1 * iw, v1 * ih, z,
+		(mod & 0x00ffffffu) | (uint32_t)alpha << 24, add & 0x00ffffffu);
+}
+
 static uint64_t clock_us(void) { return timer_us_gettime64(); }
 static const rt_backend backend = { t_alloc, t_free, t_write, q_textured, q_shadow, q_solid, clock_us,
-	t_alloc_pal4, t_write_pal4, pal_set, q_pal, q_tint };
+	t_alloc_pal4, t_write_pal4, pal_set, q_pal, q_tint, q_alpha, q_view };
 
 /* The stats overlay (Start + Y toggles it, dc_overlay_on): two lines of figures over the top of the
    picture, from the BIOS font (12 x 24) drawn at half size. Each figure covers the last 64 frames:
@@ -490,7 +525,20 @@ static void overlay_text(float x, float y, const char *str)
 	}
 }
 
-int dc_pvr_start(void)
+/* The video mode: 320 x 240 (the board's picture 1:1, doubled by the video hardware: 480p on a VGA box, 240p
+   at 60 Hz NTSC timing on any other cable); for 2 PLAYERS 640 x 480 (480p on VGA, 480i on the others), both
+   screens' 320 x 224 pictures 1:1 side by side in it */
+static void set_video(int screens)
+{
+	const bool vga = dc_video_choice == DC_VIDEO_480P;
+	if (screens < 2)
+		vid_set_mode(vga ? DM_320x240_VGA : DM_320x240_NTSC, PM_RGB565);
+	else
+		vid_set_mode(vga ? DM_640x480_VGA : DM_640x480_NTSC_IL, PM_RGB565);
+}
+
+static void font_init(void);
+static int pvr_setup(int screens)
 {
 	pvr_init_params_t params = {
 		{ PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_32 },
@@ -504,12 +552,17 @@ int dc_pvr_start(void)
 	};
 	/* 320 x 240, the board's 320 x 224 1:1 in it: on a VGA box at 480p the video hardware doubles each
 	   pixel and each line (sharp 2x); at 240p 60 Hz NTSC timing, on PAL consoles too, through any cable */
-	vid_set_mode(dc_video_choice == DC_VIDEO_480P ? DM_320x240_VGA : DM_320x240_NTSC, PM_RGB565);
+	set_video(screens);
+	screens_now = screens;
+	view_x = 0.0f;
+	view_y = screens > 1 ? (480.0f - 224.0f) / 2.0f : OY;
 	if (pvr_init(&params) != 0)
 		return -1;
 	pvr_set_bg_color(0.0f, 0.0f, 0.0f);
 	pvr_set_pal_format(PVR_PAL_ARGB1555);    /* (the paletted sprite textures' banks) */
-	for (int i = 0; i < 2; i++) jobs[i].stage = memalign(32, STAGE_BYTES);    /* (without, writes drain) */
+	for (int i = 0; i < 2; i++) if (!jobs[i].stage) jobs[i].stage = memalign(32, STAGE_BYTES);    /* (without, writes drain) */
+	for (int i = 0; i < MAX_TEX; i++) tex[i].p = NULL;    /* (a new pool: every texture gone) */
+	pool = NULL;
 	/* all the texture memory left after the frame and vertex buffers, as one pool */
 	size_t pool_bytes = pvr_mem_available();
 	pool_bytes = pool_bytes > TEX_RESERVE ? (pool_bytes - TEX_RESERVE) & ~(size_t)255 : 0;
@@ -518,6 +571,13 @@ int dc_pvr_start(void)
 	if (pool && va_init((uint32_t)pool_bytes) != 0) pool = NULL;
 	rt_init(&backend);
 	font_init();
+	return pool ? 0 : -1;
+}
+
+int dc_pvr_start(void)
+{
+	if (pvr_setup(1) != 0)
+		return -1;
 	/* KOS switches to a thread an interrupt woke (the end of a render) at its next scheduler tick: 1 ms
 	   instead of the default 10 ms, so the submit thread and the frame follow a render without lag */
 	thd_set_hz(1000);
@@ -594,9 +654,35 @@ static bool set_still_busy(void)
 	return true;
 }
 
+/* 2 PLAYERS begins or ends: every scene sent and rendered, then the PowerVR set up again for the other
+   picture size (its memory with it: every texture is made again, a frame or two of the game's loading) */
+static void change_screens(int screens)
+{
+	sem_wait(&jobs_free);
+	sem_wait(&jobs_free);    /* (both sets sent; the submit thread waits for the next) */
+	pvr_wait_ready();
+	pvr_wait_render_done();
+	flush_stage(&jobs[0]);
+	flush_stage(&jobs[1]);
+	pvr_shutdown();
+	pvr_setup(screens);
+	sem_signal(&jobs_free);
+	sem_signal(&jobs_free);
+}
+
+int dc_pvr_screens(void) { return screens_now; }
+
 void dc_pvr_frame(const dl_frame *frame)
 {
+	dc_pvr_frame_n(&frame, 1);
+}
+
+void dc_pvr_frame_n(const dl_frame *const *frames, int count)
+{
 	rt_stats stats;
+	const dl_frame *frame = frames[0];
+	if (count != screens_now)
+		change_screens(count);
 
 	const uint64_t t0 = timer_us_gettime64();
 	have_set = false;
@@ -615,7 +701,7 @@ void dc_pvr_frame(const dl_frame *frame)
 		have_set = true;
 	}
 	else
-		rt_prepare(frame, set_still_busy, 12000);
+		rt_prepare_n(frames, count, set_still_busy, 12000);
 	const uint64_t tp = timer_us_gettime64();
 	dc_where = 'W';
 	if (!have_set) sem_wait(&jobs_free);
@@ -640,7 +726,7 @@ void dc_pvr_frame(const dl_frame *frame)
 		rt_set_build_limit((uint32_t)budget);
 		dc_build_budget_us = (uint32_t)budget;
 	}
-	rt_frame(frame, &stats);
+	rt_frame_n(frames, count, &stats);
 	{
 		/* (overlay line 5, averages over 64 frames in ms: the game and sound since the last frame's
 		   hand-over / waiting for the list set / planes / sprites without builds / sprite builds) */
@@ -708,10 +794,11 @@ void dc_pvr_frame(const dl_frame *frame)
 				pvr_get_stats(&ps);
 				extern volatile int dc_safe_mode;
 				extern bool rt_pal_enabled;
-				snprintf(overlay_line[2], sizeof(overlay_line[2]), "Y%u/%u R%u.%u A%d L%d Z%d",
+				extern bool rt_previews, rt_new_cells_first, dl_fog_blend, rt_low_2p;
+				snprintf(overlay_line[2], sizeof(overlay_line[2]), "Y%u/%u R%u.%u A%d L%d Z%d P%d N%d F%d H%d",
 					(unsigned)(vtx_used / 1024), (unsigned)(vtx_used_max / 1024),
 					(unsigned)(ps.rnd_last_time / 1000000), (unsigned)(ps.rnd_last_time / 100000 % 10),
-					dc_safe_mode, rt_pal_enabled ? 1 : 0, dc_depth_compact);
+					dc_safe_mode, rt_pal_enabled ? 1 : 0, dc_depth_compact, rt_previews, rt_new_cells_first, dl_fog_blend, rt_low_2p);
 			}
 			/* (T: sprite builds that waited for an unpack; K: builds that ran out of the frame's time) */
 			{

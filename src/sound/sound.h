@@ -14,6 +14,8 @@
 
 #include "sound/support.h"
 
+extern bool sound_seats_split;    /* (midi.c) */
+
 /* the board's I/O ports the program uses */
 #define FM_ADDRESS 0x80u
 #define FM_DATA 0x81u

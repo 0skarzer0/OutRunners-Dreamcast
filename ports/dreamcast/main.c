@@ -49,6 +49,7 @@ static void test_actions_load(void) {
 }
 
 static void test_actions_apply(void) {
+    if (test_action_count) console_offer_two_players(true);    /* (a test: 2 PLAYERS without a second pad) */
     for (int i = 0; i < test_action_count; i++)
         if (test_actions[i].frame == (uint32_t)s32_board.frame) {
             if (test_actions[i].pause) test_pause_due = true;
@@ -157,6 +158,7 @@ static void rumble_frame(bool motor) {
 /* The pause (Start in a race): the game and its sound held, the frame it stopped at dimmed under PAUSE
    and its lines in the game's letters (console_pause_sprites, through the drawlist's overlay). Start or B
    goes on, as CONTINUE does; RESTART starts the same game again; QUIT GAME goes back to the title. */
+static void dc_pvr_draw(void);
 static void run_pause(void) {
 #ifdef DC_PVR
     static uint8_t list[0x800];
@@ -169,7 +171,7 @@ static void run_pause(void) {
     for (int frames = 0;; frames++) {
         if (test_action_count && frames >= 240) break;    /* (a test's pause ends by itself) */
         dl_overlay(list, console_pause_sprites(list, sizeof(list), choice));
-        dc_pvr_frame(dl_build());
+        dc_pvr_draw();
         const uint32_t pressed = dc_menu_actions();
         if (pressed & (ACTION_BIT(ACTION_UP) | ACTION_BIT(ACTION_DOWN))) {
             const int step = (pressed & ACTION_BIT(ACTION_UP)) ? CONSOLE_PAUSE_ITEMS - 1 : 1;
@@ -184,7 +186,13 @@ static void run_pause(void) {
         }
         else if (pressed & ACTION_BIT(ACTION_BACK))
             break;
-        if (dc_exit_requested()) break;
+        if (dc_exit_requested()) {
+#ifdef ORUNNERS_CONSOLE
+            console_quit_game();    /* (the soft reset: as QUIT GAME) */
+            dc_exit_clear();
+#endif
+            break;
+        }
     }
     dl_overlay(NULL, 0);
     dc_aica_pause(false);
@@ -192,7 +200,54 @@ static void run_pause(void) {
 #endif
 }
 
+/* SAVE GHOST: a TIME ATTACK run faster than any before, at its goal, offered to the VMU (vmu_save.c writes it
+   if the player says so), over the stopped frame as the pause is */
+static void run_ghost_prompt(void) {
+#if defined(DC_PVR) && !defined(DC_NO_VMU)
+    static uint8_t list[0x800];
+    static const char *const items[2] = { "SAVE TO VMU", "DO NOT SAVE" };
+    int choice = 0;
+    bool save = false;
+
+    dc_paused = 1;
+    dc_aica_pause(true);
+    rumble_frame(false);
+    (void)dc_menu_actions();
+    for (int frames = 0;; frames++) {
+        if (test_action_count && frames >= 240) break;
+        dl_overlay(list, console_prompt_sprites(list, sizeof(list), "SAVE GHOST", items, 2, choice));
+        dc_pvr_draw();
+        const uint32_t pressed = dc_menu_actions();
+        if (pressed & (ACTION_BIT(ACTION_UP) | ACTION_BIT(ACTION_DOWN)))
+            choice ^= 1;
+        else if (pressed & ACTION_BIT(ACTION_ACCEPT)) {    /* (A, or Start) */
+            save = choice == 0;
+            break;
+        }
+        else if (pressed & ACTION_BIT(ACTION_BACK))
+            break;
+        if (dc_exit_requested()) break;
+    }
+    dc_vmu_ghost_answer(save);
+    dl_overlay(NULL, 0);
+    dc_aica_pause(false);
+    dc_paused = 0;
+#endif
+}
+
 static void console_frame(void) {
+    {
+        /* 2 PLAYERS: both screens drawn (the right one's sprites decoded from the next list on), and each
+           seat's effects on its own side (player 1 left), player 1's music alone in the middle */
+        extern bool dc_aica_cabinet_pan, sound_seats_split;
+        const bool both = console_both_screens();
+        dl_set_screens(both ? 2 : 1);
+        dc_aica_cabinet_pan = both;
+        sound_seats_split = both;    /* (one song: player 1's, in the middle; midi.c) */
+#ifndef DC_NO_VMU
+        if (both) dc_vmu_ghost_release();    /* (the memory for the second screen's road) */
+#endif
+    }
     if (console_window_settings.changed) {
         console_window_settings.changed = false;
         options_apply();
@@ -202,6 +257,19 @@ static void console_frame(void) {
     if ((dc_pause_wanted() || test_pause_due) && console_can_pause())
         run_pause();
     test_pause_due = false;
+#ifndef DC_NO_VMU
+    {
+        /* (a second and a half after the goal's new fastest run, the finish seen first) */
+        static int offered_for;
+        if (!console_both_screens() && dc_vmu_ghost_offer()) {
+            if (++offered_for >= 90) {
+                offered_for = 0;
+                run_ghost_prompt();
+            }
+        } else
+            offered_for = 0;
+    }
+#endif
 }
 #endif
 volatile uint32_t dc_boot_stage = 0;
@@ -237,6 +305,16 @@ static void (*real_sprites_due)(bool, bool);
    load) the schedule starts again. */
 volatile uint32_t dc_frames_skipped;
 volatile uint32_t dc_sound_us_total;
+/* The frame's picture: the left screen's, and with 2 PLAYERS the right one's beside it */
+static void dc_pvr_draw(void) {
+    extern bool rt_ring_planes;
+    const dl_frame *frames[2];
+    frames[0] = dl_build();
+    frames[1] = dl_frame_of(1);
+    rt_ring_planes = dl_screens() > 1;
+    dc_pvr_frame_n(frames, dl_screens());
+}
+
 static void pvr_frame_shown(void) {
     static uint64_t due;
     static bool skipped_last;
@@ -250,7 +328,7 @@ static void pvr_frame_shown(void) {
         return;
     }
     skipped_last = false;
-    dc_pvr_frame(dl_build());
+    dc_pvr_draw();
 }
 #endif
 
@@ -344,7 +422,14 @@ static void frame_callback(void) {
         dc_status("ERROR - media read failed");
         program_stop();
     } else if (dc_exit_requested()) {
+#ifdef ORUNNERS_CONSOLE
+        /* the soft reset (A + B + X + Y + Start): the game being played ends, back to the title, as the
+           pause's QUIT GAME (it used to stop the program: the stopped screen) */
+        console_quit_game();
+        dc_exit_clear();
+#else
         program_stop();
+#endif
     }
 #ifndef DC_PVR
     vid_waitvbl();    /* (the PowerVR's scene flips at VBLANK and pvr_wait_ready paces it) */

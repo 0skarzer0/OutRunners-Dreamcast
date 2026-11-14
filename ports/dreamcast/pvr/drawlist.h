@@ -49,6 +49,7 @@ typedef struct dl_mix
 	uint8_t offsets;         /* 0, 1 or 2 (none) */
 	uint8_t blend;           /* layers it blends with (bits by DL_ index), 0 none */
 	uint16_t sprite_blend;
+	uint8_t screen;          /* whose palette (0 the left screen's) */
 } dl_mix;
 
 typedef struct dl_plane
@@ -73,6 +74,7 @@ typedef struct dl_sprite
 	bool indirect;
 	bool shadow;             /* shadow sprite: clears bit 15 under it */
 	bool extra;              /* its colours from the extra palette where one is set (s32_video_extra_at) */
+	bool ghost;              /* half see-through (S32_SPRITE_GHOST: TIME ATTACK's ghost) */
 	uint8_t end_pen;
 	uint16_t color;          /* direct: 0x8000 | colour bits */
 	uint16_t transparent_bits;
@@ -85,7 +87,8 @@ typedef struct dl_frame
 {
 	bool display_on;
 	dl_mix layers[DL_LAYERS];            /* text..bitmap, backdrop at DL_BACKDROP */
-	dl_plane planes[DL_SPRITES];         /* DL_TEXT..DL_BITMAP */
+	dl_plane *planes;                    /* DL_TEXT..DL_BITMAP (the screens share them: one video RAM) */
+	int screen;                          /* 0 the left screen, 1 the right */
 	uint16_t backdrop[DL_HEIGHT];        /* raw backdrop pixel per row */
 	/* sprites */
 	dl_mix groups[16];                   /* per sprite group: priority, palette base, shift, offsets */
@@ -118,8 +121,15 @@ void dl_sprites_due(bool erase, bool draw);
    under them. NULL: none again */
 void dl_overlay(const uint8_t *list, size_t size);
 
-/* The frame as the board's memories stand now (call where s32_video_draw_frame would run) */
+/* The screens drawn: 1 (the left screen's alone; the right one's sprites are not even decoded) or 2 (the
+   console's 2 PLAYERS) */
+void dl_set_screens(int screens);
+int dl_screens(void);
+
+/* The frame as the board's memories stand now (call where s32_video_draw_frame would run): the left
+   screen's; with two screens the right one's is built at the same time, dl_frame_of(1) */
 const dl_frame *dl_build(void);
+const dl_frame *dl_frame_of(int screen);
 
 /* Raw pixel of a plane (layer index DL_TEXT..DL_BITMAP) at plane coordinates; 0 transparent */
 uint16_t dl_plane_pixel(int layer, int sx, int sy);

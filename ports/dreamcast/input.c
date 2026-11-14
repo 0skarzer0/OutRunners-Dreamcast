@@ -12,7 +12,6 @@
    OPTIONS > STEERING has it */
 static uint32_t actions_held;
 static bool pause_wanted;
-static int pad_wheel = 128;    /* (the D-pad's wheel: turned while held, back to the centre let go) */
 
 /* the menu actions held now: the D-pad or the stick, A accepts, B goes back, Start */
 static uint32_t actions_of(const cont_state_t *pad)
@@ -72,6 +71,42 @@ static bool stick_wheel(int stick, int *position)
 }
 #endif
 
+#ifdef ORUNNERS_CONSOLE
+/* One controller as a seat's cabinet controls: the wheel (the stick past its dead zone, else the D-pad's,
+   turned at STEERING's SPEED), the triggers as the pedals, A and B the gears, Y the music, D-pad up and
+   down the songs; Start the seat's START outside a race */
+static int pad_wheels[2] = { 128, 128 };
+static void seat_inputs(const cont_state_t *pad, int seat, bool racing)
+{
+    s32_inputs *input = &s32_board.input;
+    const bool left = (pad->buttons & CONT_DPAD_LEFT) != 0, right = (pad->buttons & CONT_DPAD_RIGHT) != 0;
+    int *pad_wheel = &pad_wheels[seat];
+    int wheel;
+    {
+        const int turn = 12 + 2 * (console_window_settings.steering_speed - STEERING_NORMAL);
+        const int back = turn * 4 / 3;
+        if (left != right)
+            *pad_wheel += right ? turn : -turn;
+        else if (*pad_wheel < 128)
+            *pad_wheel = *pad_wheel + back > 128 ? 128 : *pad_wheel + back;
+        else
+            *pad_wheel = *pad_wheel - back < 128 ? 128 : *pad_wheel - back;
+        *pad_wheel = *pad_wheel < 0 ? 0 : (*pad_wheel > 255 ? 255 : *pad_wheel);
+    }
+    wheel = *pad_wheel;
+    (void)stick_wheel(pad->joyx, &wheel);
+    input->analog[seat ? 3 : 0] = (uint8_t)wheel;
+    input->analog[seat ? 6 : 1] = (uint8_t)pad->rtrig;
+    input->analog[seat ? 7 : 2] = (uint8_t)pad->ltrig;
+    if ((pad->buttons & CONT_START) && !racing) input->port_e[seat] &= ~0x10;
+    if (pad->buttons & CONT_A) input->port_a[seat] &= ~0x01;
+    if (pad->buttons & CONT_B) input->port_a[seat] &= ~0x02;
+    if (pad->buttons & CONT_Y) input->port_b[seat] &= ~0x01;
+    if (pad->buttons & CONT_DPAD_UP) input->port_b[seat] &= ~0x02;
+    if (pad->buttons & CONT_DPAD_DOWN) input->port_b[seat] &= ~0x04;
+}
+#endif
+
 static bool exit_flag = false;
 
 void dc_controls_update(void)
@@ -90,42 +125,25 @@ void dc_controls_update(void)
 
 #ifdef ORUNNERS_CONSOLE
     {
-        /* the menus' actions newly pressed; in a race Start is the pause (main.c), no cabinet's */
+        /* the menus' actions newly pressed (the first controller's); in a race Start is the pause
+           (main.c), no cabinet's */
         const uint32_t held = actions_of(pad);
         const uint32_t pressed = held & ~actions_held;
         const bool racing = console_can_pause();
-        const bool left = (pad->buttons & CONT_DPAD_LEFT) != 0, right = (pad->buttons & CONT_DPAD_RIGHT) != 0;
-        int wheel;
 
         actions_held = held;
         if (racing && (pressed & ACTION_BIT(ACTION_START)))
             pause_wanted = true;
         else
             console_actions(pressed);
-        /* the wheel: the stick past its dead zone; else the D-pad's, turned at STEERING's SPEED */
-        {
-            const int turn = 12 + 2 * (console_window_settings.steering_speed - STEERING_NORMAL);
-            const int back = turn * 4 / 3;
-            if (left != right)
-                pad_wheel += right ? turn : -turn;
-            else if (pad_wheel < 128)
-                pad_wheel = pad_wheel + back > 128 ? 128 : pad_wheel + back;
-            else
-                pad_wheel = pad_wheel - back < 128 ? 128 : pad_wheel - back;
-            pad_wheel = pad_wheel < 0 ? 0 : (pad_wheel > 255 ? 255 : pad_wheel);
-        }
-        wheel = pad_wheel;
-        (void)stick_wheel(pad->joyx, &wheel);
-        input->analog[0] = (uint8_t)wheel;
-        input->analog[1] = (uint8_t)pad->rtrig;
-        input->analog[2] = (uint8_t)pad->ltrig;
-        if ((pad->buttons & CONT_START) && !racing) input->port_e[0] &= ~0x10;
-        if (pad->buttons & CONT_A) input->port_a[0] &= ~0x01;
-        if (pad->buttons & CONT_B) input->port_a[0] &= ~0x02;
-        if (pad->buttons & CONT_Y) input->port_b[0] &= ~0x01;
-        /* the music buttons beside the wheel: previous and next */
-        if (pad->buttons & CONT_DPAD_UP) input->port_b[0] &= ~0x02;
-        if (pad->buttons & CONT_DPAD_DOWN) input->port_b[0] &= ~0x04;
+        seat_inputs(pad, 0, racing);
+        /* the second controller (port B or later) is the right seat's: offered as 2 PLAYERS in the menu
+           while there is one, and the seat's in a race of both (or CLASSIC's challenger, its START) */
+        maple_device_t *dev2 = maple_enum_type(1, MAPLE_FUNC_CONTROLLER);
+        cont_state_t *pad2 = dev2 ? maple_dev_status(dev2) : NULL;
+        console_offer_two_players(pad2 != NULL);
+        if (pad2 && (console_both_screens() || console_right_seat_joins()))
+            seat_inputs(pad2, 1, racing);
     }
 #else
     /* wheel: the analogue stick, centred at 128, with a small dead zone (sticks rest a few counts off
@@ -160,6 +178,20 @@ void dc_controls_update(void)
     {
         extern volatile int dc_overlay_on;
         static bool combo_held;
+#ifdef ORUNNERS_CONSOLE
+    {
+        /* (test builds: X + A previews, X + B planes move to new colours at once, X + down the fog blend, X + up 2 PLAYERS' half-resolution scenery, each off and on) */
+        extern bool rt_previews, rt_new_cells_first, dl_fog_blend, rt_low_2p;
+        static uint32_t xheld;
+        const uint32_t now = pad->buttons & (CONT_X | CONT_A | CONT_B | CONT_DPAD_DOWN | CONT_DPAD_UP);
+        const uint32_t pressed = now & ~xheld;
+        xheld = now;
+        if ((now & CONT_X) && (pressed & CONT_A)) rt_previews = !rt_previews;
+        if ((now & CONT_X) && (pressed & CONT_B)) rt_new_cells_first = !rt_new_cells_first;
+        if ((now & CONT_X) && (pressed & CONT_DPAD_DOWN)) dl_fog_blend = !dl_fog_blend;
+        if ((now & CONT_X) && (pressed & CONT_DPAD_UP)) rt_low_2p = !rt_low_2p;
+    }
+#endif
 #ifdef ORUNNERS_CONSOLE    /* (Start is the pause there: X + Y) */
         const bool combo = (pad->buttons & CONT_X) && (pad->buttons & CONT_Y);
 #else
@@ -190,13 +222,24 @@ void dc_controls_update(void)
     }
 #endif
 
-    if ((pad->buttons & CONT_A) && (pad->buttons & CONT_B) && (pad->buttons & CONT_X) && (pad->buttons & CONT_Y) && (pad->buttons & CONT_START))
-        exit_flag = true;
+    {
+        /* A + B + X + Y + Start, the Dreamcast's soft reset: once each time the five are pressed together */
+        static bool combo_held;
+        const bool combo = (pad->buttons & CONT_A) && (pad->buttons & CONT_B) && (pad->buttons & CONT_X) && (pad->buttons & CONT_Y) && (pad->buttons & CONT_START);
+        if (combo && !combo_held)
+            exit_flag = true;
+        combo_held = combo;
+    }
 }
 
 bool dc_exit_requested(void)
 {
     return exit_flag;
+}
+
+void dc_exit_clear(void)
+{
+    exit_flag = false;
 }
 
 

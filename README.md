@@ -14,27 +14,28 @@ Dreamcast port. Upstream's own README is kept at [docs/UPSTREAM_README.md](docs/
 
 ## Status
 
-**Version 0.2, experimental.** Download it from [Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases).
+**Version 0.3.** Download it from [Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases).
+Played on a Dreamcast with GDEMU during development.
 
-New in 0.2: the PC version's **title menu** (ARCADE, & KNUCKLES, OPTIONS), a **pause menu**, **vibration**, and
-options saved to the VMU.
+New in 0.3:
+- **2 PLAYERS:** both players in one race on one console.
+- **Time Attack ghosts,** saved to the VMU.
+- **Niagara Falls' mist** no longer flickers.
+- **Large distant scenery** no longer blinks while its texture is being built.
+- **Soft reset:** A + B + X + Y + Start.
 
-What has been tested:
-- **Version 0.2 on a Dreamcast with GDEMU:** it boots and plays.
-- **Version 0.1:** on a Dreamcast with GDEMU, and in the Flycast emulator.
-- **The 0.2 disc:** in Flycast it boots through the loading screen and the SEGA intro to the title screen.
-- **The menus, the first OPTIONS page, & KNUCKLES > REVERSE and the pause:** checked in Flycast with scripted
-  inputs only.
-- **Not individually checked yet:** each menu with a real pad, the other OPTIONS pages, CLASSIC, TIME ATTACK,
-  FULL, vibration and saving options to the VMU. Reports are very welcome.
-
-Known gaps:
-- Large distant scenery can **flicker** on some stages (the pyramids, the snow).
-- In the busiest stretches a frame can be dropped to keep the game and its music at full speed, and distant
-  scenery can appear a moment late.
-- **TIME ATTACK has no ghost car**: there isn't enough spare memory for the recording.
-- FM sound and sound LFOs aren't reproduced.
-- One player only: no 2 PLAYERS and no NETWORK.
+Known issues:
+- **2 PLAYERS is demanding:** it can drop frames or run below full speed in busy stretches.
+- **Old colours at the screen edges:** where a stage's colours change, the ground and road at the edges of the
+  screen can briefly show blocks of the old colours. This happens on emulators and on a console.
+- **Dropped frames in one player:** the busiest stretches can drop a frame to keep the game and its music at
+  full speed.
+- **Ghost lines:** a VMU ghost can take a slightly rounder line than the original run through hard corners or
+  crashes.
+- **Sound:** FM sound and sound LFOs aren't reproduced.
+- **No NETWORK mode.**
+- **Jingle Bell can't be reached:** the arcade's secret track needs both song buttons pressed at once, which the
+  Dreamcast pad can't do.
 
 ## Making the disc
 
@@ -44,7 +45,7 @@ You need:
   compiler and [mkdcdisc](https://gitlab.com/simulant/mkdcdisc) 0.0.4 or later.
 
 Using the release package
-([Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases), `OutRunners-DC-0.2.zip`):
+([Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases), `OutRunners-DC-0.3.zip`):
 - **Windows:** drag `orunners.zip` onto `make_disc.bat`, or run it and choose the zip.
 - **Linux/WSL:** `./make_disc.sh /path/to/orunners.zip`
 
@@ -58,6 +59,7 @@ GDEMU, copy it into a new numbered folder on the SD card.
 |---|---|
 | VGA box or cable | **480p**: the arcade's 320 × 224 picture at exactly twice its size, each pixel and line doubled by the video hardware. Sharp, with no scaling shimmer or blur. |
 | RGB/SCART, S-Video, composite | **240p at 60 Hz**, progressive, like the arcade board's own picture, on PAL consoles too (at 50 Hz the game would run slow). Your TV must accept 60 Hz. |
+| 2 PLAYERS (any cable) | Two 320 × 224 races side by side in a 640 × 480 picture with black bars: **480p** on VGA, **480i** on the other cables (in this mode only). The screen goes black for a moment as the mode changes. |
 
 ## Menus
 
@@ -66,10 +68,34 @@ Press Start on the title screen:
 | Menu | What's in it |
 |---|---|
 | **ARCADE** | The arcade game, one player, free play |
-| **& KNUCKLES** | CLASSIC (the arcade game with a little more time), TIME ATTACK (no time limit; no ghost car yet), FULL (all the stages in one race), REVERSE (from a goal back to the start) |
+| **2 PLAYERS** | Both players in one race, side by side. Shown when a second controller is plugged in. |
+| **& KNUCKLES** | CLASSIC (the arcade game with a little more time; a second player can join with Start), TIME ATTACK (no time limit, racing your fastest run as a see-through ghost car), FULL (all the stages in one race), REVERSE (from a goal back to the start) |
 | **OPTIONS** | DIFFICULTY, TIME, VOLUME, SOUND TEST, STEERING (the stick's dead zone and sensitivity, the D-pad's steering speed, vibration, an input test), FPS |
 
-In a race, Start pauses the game: CONTINUE, RESTART or QUIT GAME.
+In a race, Start pauses the game: CONTINUE, RESTART or QUIT GAME. DIFFICULTY sets the traffic and rivals, and
+TIME sets the seconds each stage gives you. If the arcade game is too hard to finish, turn TIME down too.
+
+## 2 PLAYERS
+
+- **Picture:** the two races are shown side by side, each at the arcade's own 320 × 224.
+- **Controller:** the second player uses the controller in port B (or the next port with one), with the same
+  controls.
+- **Sound:** player 1's music plays from both speakers. Each player's engine and effects come from their own
+  side: player 1 on the left, player 2 on the right.
+- **Detail:** large scenery is drawn at half resolution in this mode, so that two races fit in each frame.
+
+## Time Attack ghosts
+
+TIME ATTACK records each run and races your fastest one again as a see-through car. After a run faster than any
+before, the game asks **SAVE GHOST**:
+- **SAVE TO VMU** keeps it on the VMU, in a file called `ORGHOST` (about 23 blocks for a five-minute run). A
+  saved ghost is loaded when the game starts.
+- **DO NOT SAVE** keeps it only until the console is switched off.
+
+To fit on a VMU, the run is stored as the car's position once a second, with the moments in between filled in
+on a smooth curve. That's why the ghost can take a slightly rounder line than you did through a hard corner or a
+crash. Playing 2 PLAYERS clears the ghost from memory because it needs the room, so TIME ATTACK reads the saved
+one from the VMU again.
 
 ## Controls (standard controller, port A)
 
@@ -82,10 +108,11 @@ In a race, Start pauses the game: CONTINUE, RESTART or QUIT GAME.
 | A / B | Gear shift | A picks a line, B goes back |
 | Start | Start; pause a race | Pick a line |
 | Y | Music select | |
-| D-pad up / down | Previous / next music | Move |
+| D-pad up / down | Previous / next music (every car can play all ten songs) | Move |
+| A + B + X + Y + Start | Soft reset: ends the game and goes back to the title | |
 
 The game runs on **free play**, so there's no coin button. A vibration pack shakes when the cabinet's wheel
-motor would, for example in a crash or off the road.
+motor would, for example in a crash or off the road. A second controller has the same controls for player 2.
 
 **Changes since 0.1:** Start now opens the menu and pauses a race, A and B work the menus, the D-pad turns the
 wheel gradually instead of snapping to full lock, and X no longer inserts a coin.
@@ -94,12 +121,17 @@ wheel gradually instead of snapping to full lock, and X no longer inserts a coin
 
 Course records, the game's settings, the OPTIONS menu's settings and its bookkeeping are saved to the first
 VMU found, in a file called `ORUNNERS` (about 2 blocks), and loaded when the game starts. Records and settings
-are saved within ten seconds of a change; the rest is saved at most every five minutes.
+are saved within ten seconds of a change; the rest is saved at most every five minutes. A Time Attack ghost you
+choose to save goes in a second file, `ORGHOST`.
 
 ## Sound
 
 The arcade board serves two cabinets and sends each seat's sound to one speaker. Here both sides go to both
-speakers, so the music and effects are centred.
+speakers in one-player games, so the music and effects are centred. For 2 PLAYERS, see above.
+
+The arcade draws the mist at **Niagara Falls** on two frames out of four, which an arcade monitor blended into a
+haze. On a modern screen that flickers (it does in the PC version too), so here it is drawn half see-through
+every frame instead. Cars are never affected.
 
 ## Getting it onto a Dreamcast
 
@@ -166,8 +198,8 @@ The slop got checked, though:
 - **Builds:** every change was built and reviewed.
 - **Emulator:** behaviour was checked in Flycast.
 - **Real hardware:** the console-only bugs (unaligned accesses, the video chip's timing, texture
-  interpolation) were found from videos of a real Dreamcast and fixed one by one. 0.2 was played on a real
-  console with GDEMU.
+  interpolation) were found from videos of a real Dreamcast and fixed one by one. Each release is played on a real
+  Dreamcast with GDEMU.
 
 If you find a bug, it's probably the robots. Report it anyway.
 

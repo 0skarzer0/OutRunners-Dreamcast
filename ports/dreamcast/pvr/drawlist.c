@@ -6,21 +6,28 @@
 #include "drawlist.h"
 #include <s32/machine.h>
 #include <string.h>
+#include <stdlib.h>
 
 static s32_graphics graphics;
 static int (*row_reader)(uint32_t place, int words, uint32_t *out);
 
 void dl_set_sprite_row_reader(int (*reader)(uint32_t, int, uint32_t *)) { row_reader = reader; }
-static dl_frame frame;
+static dl_frame frames[2];
+static dl_plane planes_shared[DL_SPRITES];
+static int mix_screen;    /* (the screen whose frame is being built) */
+static int screens = 1;
+#define frame (frames[mix_screen])
 #define DL_OVERLAY_SPRITES 96
 /* (the third list: the frame's own with the overlay's sprites after them, while there is an overlay) */
 static dl_sprite lists[2][DL_MAX_SPRITES];
-static dl_sprite overlay_list[DL_MAX_SPRITES + DL_OVERLAY_SPRITES];
+static dl_sprite *overlay_list[2];    /* (allocated at the first overlay) */
 static dl_sprite overlay_sprites[DL_OVERLAY_SPRITES];
 static int overlay_count;
 static dl_sprite *decode_into;
 static int *decode_count, decode_room;
 static int list_count[2];
+static dl_sprite *lists1;    /* (the right screen's two lists, DL_MAX_SPRITES each: allocated for 2 PLAYERS) */
+static int list_count1[2];
 static int shown_list;
 static uint32_t list_unsupported;
 
@@ -45,7 +52,7 @@ static uint8_t video_byte(uint32_t address)
 }
 
 static uint16_t video_register(uint32_t offset) { return video_word((0x1ff00 + offset) / 2); }
-static uint16_t mixer_register(uint32_t offset) { return s32_board.mixer[0][offset / 2]; }
+static uint16_t mixer_register(uint32_t offset) { return s32_board.mixer[mix_screen][offset / 2]; }
 
 static const uint8_t *word_source;    /* (dl_overlay: a list of the port's in place of sprite RAM) */
 static size_t word_source_size;
@@ -63,6 +70,7 @@ void dl_init(const s32_graphics *g)
 {
 	graphics = *g;
 	memset(list_count, 0, sizeof(list_count));
+	memset(list_count1, 0, sizeof(list_count1));
 	shown_list = 0;
 }
 
@@ -453,7 +461,7 @@ static const uint8_t grouping_table[16][3] = {
 
 uint16_t dl_color(const dl_mix *entry, int pixel)
 {
-	return s32_board.palette[0][(entry->palette_base + ((pixel >> entry->shift) & 0xfff0) + (pixel & 0x0f)) & 0x3fff];
+	return s32_board.palette[entry->screen & 1][(entry->palette_base + ((pixel >> entry->shift) & 0xfff0) + (pixel & 0x0f)) & 0x3fff];
 }
 
 /* ---- sprites (video.c: s32_video_sprites, draw_sprite_list, draw_sprite) ---- */
@@ -489,12 +497,13 @@ static int decode_sprite(uint32_t entry, int x_offset, int y_offset, const int16
 	const int taken = (bit(flags, 13) && table_inline) ? 2 : 0;
 	dl_sprite s;
 
-	if (screen != 0)
+	if (screen != 0 && (screens < 2 || !lists1))
 		return taken;
 	memset(&s, 0, sizeof(s));
 	s.indirect = bit(flags, 13);
 	s.shadow = bit(flags, 11) && bit(latched[5], 0);
 	s.extra = s32_video_extra_used() && (size & S32_SPRITE_EXTRA_PALETTE) != 0;
+	s.ghost = s32_video_extra_used() && (sprite_word(entry + 7) & S32_SPRITE_GHOST) != 0;
 	s.bits8 = bit(flags, 9);
 	s.color = (uint16_t)(0x8000 | (sprite_word(entry + 7) & (s.bits8 ? 0x7f00 : 0x7ff0)));
 	const int source_width = s.bits8 ? (size & 0x3f) : ((size >> 1) & 0x3f);
@@ -550,6 +559,11 @@ static int decode_sprite(uint32_t entry, int x_offset, int y_offset, const int16
 	{
 		if (*decode_count < decode_room)
 			decode_into[(*decode_count)++] = s;
+	}
+	else if (screen != 0)
+	{
+		if (list_count1[target] < DL_MAX_SPRITES)
+			lists1[target * DL_MAX_SPRITES + list_count1[target]++] = s;
 	}
 	else if (list_count[target] < DL_MAX_SPRITES)
 		lists[target][list_count[target]++] = s;
@@ -614,6 +628,9 @@ void dl_overlay(const uint8_t *list, size_t size)
 	overlay_count = 0;
 	if (!list)
 		return;
+	for (int s = 0; s < 2; s++)
+		if (!overlay_list[s] && !(overlay_list[s] = malloc((DL_MAX_SPRITES + DL_OVERLAY_SPRITES) * sizeof(dl_sprite))))
+			return;
 	word_source = list;
 	word_source_size = size;
 	decode_into = overlay_sprites;
@@ -660,7 +677,7 @@ bool s32_video_extra_at(int screen, uint32_t index, uint16_t *colour)
 void dl_sprites_due(bool erase, bool draw)
 {
 	if (erase)
-		list_count[shown_list] = 0;
+		list_count[shown_list] = list_count1[shown_list] = 0;
 	if (draw)
 	{
 		shown_list ^= 1;
@@ -739,21 +756,140 @@ bool dl_sprite_decode_row(const dl_sprite *s, int row, uint16_t *out)
 
 /* ---- the frame (video.c: s32_video_draw_frame, draw_layers, draw_backdrop, mix) ---- */
 
-const dl_frame *dl_build(void)
+/* ---- sprites the game shows every other pair of frames (Niagara's fog: drawn two frames, left out two,
+   which a CRT blends into mist and a flat screen shows as flicker) ----
+   A large sprite that comes back after one or two frames away is taken as one of these for a while: it is
+   drawn half see-through, and in the frames the game leaves it out its last copy is drawn the same way, so
+   the mist stays, steady, at the strength the arcade's flicker gives. Sprites are told apart by their size
+   in the source (the fog's frames of animation share it); a size drawn more than once in a frame is left
+   alone. */
+#define FOG_SLOTS 16
+#define FOG_AREA 4000          /* (on screen, in pixels: the smaller sprites are left alone) */
+#define FOG_HOLD 16            /* (builds a sprite stays one of these after its last return) */
+typedef struct
+{
+	uint32_t key, seen, until, used;
+	int index;
+	bool many;
+	dl_sprite last;
+} fog_slot;
+static fog_slot fog[2][FOG_SLOTS];
+static uint32_t fog_build[2];
+static dl_sprite *fog_list[2];
+bool dl_fog_blend = true;      /* (test builds: switched with the others on the overlay) */
+
+static uint32_t fog_key(const dl_sprite *sp)
+{
+	return 1u << 31 | (uint32_t)sp->bits8 << 24 | (uint32_t)sp->words << 8 | (uint32_t)(sp->rows >> 3);
+}
+
+/* Only scenery in the picture's upper part can be taken for fog: never a car (the cars are 8-bit sprites,
+   and sit low on the screen), never one already half see-through (TIME ATTACK's ghost keeps its own) */
+static bool fog_candidate(const dl_sprite *sp)
+{
+	if (sp->shadow || sp->ghost || sp->bits8 || (int)sp->width * sp->height < FOG_AREA)
+		return false;
+	const int top = sp->flip_y ? sp->y - sp->height + 1 : sp->y;
+	return top < DL_HEIGHT / 3;
+}
+
+static void fog_pass(int screen)
+{
+	const uint32_t n = ++fog_build[screen];
+	fog_slot *slots = fog[screen];
+	bool any = false;
+	for (int k = 0; k < FOG_SLOTS; k++) slots[k].many = false;
+	/* this frame's large sprites against the ones remembered */
+	static uint8_t hits[FOG_SLOTS];
+	memset(hits, 0, sizeof(hits));
+	for (int i = 0; i < frame.sprite_count; i++)
+	{
+		const dl_sprite *sp = &frame.sprites[i];
+		if (!fog_candidate(sp))
+			continue;
+		const uint32_t key = fog_key(sp);
+		int k = 0, oldest = 0;
+		for (; k < FOG_SLOTS; k++)
+		{
+			if (slots[k].key == key) break;
+			if (slots[k].used < slots[oldest].used) oldest = k;
+		}
+		if (k == FOG_SLOTS)
+		{
+			k = oldest;
+			memset(&slots[k], 0, sizeof(slots[k]));
+			slots[k].key = key;
+		}
+		fog_slot *f = &slots[k];
+		if (hits[k]++) { f->many = true; f->until = 0; continue; }
+		if (f->seen && n - f->seen >= 2 && n - f->seen <= 3)
+			f->until = n + FOG_HOLD;    /* (back after one or two frames away) */
+		f->seen = f->used = n;
+		f->index = i;
+		f->last = *sp;
+	}
+	for (int k = 0; k < FOG_SLOTS; k++)
+		if (slots[k].until >= n && !slots[k].many) any = true;
+	if (!any || !dl_fog_blend)
+		return;
+	if (!fog_list[screen] && !(fog_list[screen] = malloc((DL_MAX_SPRITES + FOG_SLOTS) * sizeof(dl_sprite))))
+		return;
+	/* the list again, the fog's sprites half see-through, the ones left out this frame put back where they were */
+	dl_sprite *out = fog_list[screen];
+	int count = 0;
+	for (int i = 0; i <= frame.sprite_count; i++)
+	{
+		for (int k = 0; k < FOG_SLOTS; k++)
+		{
+			const fog_slot *f = &slots[k];
+			if (f->until >= n && !f->many && f->seen != n && n - f->seen <= 2 &&
+				(f->index == i || (i == frame.sprite_count && f->index > i)) && count < DL_MAX_SPRITES + FOG_SLOTS)
+			{
+				out[count] = f->last;
+				out[count++].ghost = true;
+			}
+		}
+		if (i == frame.sprite_count)
+			break;
+		out[count] = frame.sprites[i];
+		const dl_sprite *sp = &frame.sprites[i];
+		if (fog_candidate(sp))
+		{
+			const uint32_t key = fog_key(sp);
+			for (int k = 0; k < FOG_SLOTS; k++)
+				if (slots[k].key == key && slots[k].until >= n && !slots[k].many)
+					out[count].ghost = true;
+		}
+		count++;
+	}
+	frame.sprites = out;
+	frame.sprite_count = count;
+}
+
+static void build_one(int screen)
 {
 	const uint16_t control = video_register(0x00);
 	const uint16_t off = video_register(0x02);
 	const uint16_t more_off = video_register(0x8e);
-	int wanted = 0, drawn = 0;
+	int wanted = 0;
+	static int drawn;    /* (the planes drawn: the left screen's build finds them for both) */
 
+	mix_screen = screen;
 	memset(&frame, 0, sizeof(frame));
-	frame.display_on = s32_display_enabled(0);
+	frame.planes = planes_shared;
+	frame.screen = screen;
+	frame.display_on = s32_display_enabled(screen);
 	frame.unsupported = list_unsupported;
 	if (bit(control, 15)) frame.unsupported |= DL_UNSUP_WIDE;
 	if (s32_board.sprite_control_latched[2] & 3) frame.unsupported |= DL_UNSUP_SPR_FLIPS;
 	for (int index = DL_TEXT; index <= DL_BITMAP; index++)
-		if ((mixer_register(0x20 + 2 * (uint32_t)index) & 0x0f) != 0)
-			wanted |= 1 << index;
+		for (int s = 0; s < screens; s++)
+			if ((s32_board.mixer[s][(0x20 + 2 * (uint32_t)index) / 2] & 0x0f) != 0)
+				wanted |= 1 << index;
+	if (screen != 0)
+		goto mixer;    /* (the planes: as the left screen's build found them) */
+	drawn = 0;
+	memset(planes_shared, 0, sizeof(planes_shared));
 
 	if (bit((uint32_t)wanted, DL_NBG0) && !bit(off, 0) && !bit(more_off, 1)) { zoomed_rows(0, &frame.planes[DL_NBG0]); drawn |= 1 << DL_NBG0; }
 	if (bit((uint32_t)wanted, DL_NBG1) && !bit(off, 1) && !bit(more_off, 2)) { zoomed_rows(1, &frame.planes[DL_NBG1]); drawn |= 1 << DL_NBG1; frame.unsupported |= DL_UNSUP_NBG13; }
@@ -781,6 +917,7 @@ const dl_frame *dl_build(void)
 	}
 	for (int index = DL_TEXT; index <= DL_BITMAP; index++)
 		frame.planes[index].on = bit((uint32_t)drawn, index);
+mixer:
 
 	{
 		const uint16_t backdrop = video_register(0x5e);
@@ -838,21 +975,64 @@ const dl_frame *dl_build(void)
 			m->offsets = color_offsets(bit(mixer_register(0x3e), 6), bit(sprite_control, 15));
 		}
 	}
-	frame.sprites = lists[shown_list];
-	frame.sprite_count = list_count[shown_list];
-	frame.next_sprites = lists[shown_list ^ 1];
-	frame.next_sprite_count = list_count[shown_list ^ 1];
+	for (int index = 0; index < DL_LAYERS; index++)
+		frame.layers[index].screen = (uint8_t)screen;
+	for (int group = 0; group < 16; group++)
+		frame.groups[group].screen = (uint8_t)screen;
+	if (screen == 0)
+	{
+		frame.sprites = lists[shown_list];
+		frame.sprite_count = list_count[shown_list];
+		frame.next_sprites = lists[shown_list ^ 1];
+		frame.next_sprite_count = list_count[shown_list ^ 1];
+	}
+	else
+	{
+		frame.sprites = &lists1[shown_list * DL_MAX_SPRITES];
+		frame.sprite_count = list_count1[shown_list];
+		frame.next_sprites = &lists1[(shown_list ^ 1) * DL_MAX_SPRITES];
+		frame.next_sprite_count = list_count1[shown_list ^ 1];
+	}
+	fog_pass(screen);
 	frame.overlay_from = -1;
 	if (overlay_count)
 	{
-		memcpy(overlay_list, lists[shown_list], (size_t)frame.sprite_count * sizeof(dl_sprite));
-		memcpy(&overlay_list[frame.sprite_count], overlay_sprites, (size_t)overlay_count * sizeof(dl_sprite));
-		frame.sprites = overlay_list;
+		memcpy(overlay_list[screen], frame.sprites, (size_t)frame.sprite_count * sizeof(dl_sprite));
+		memcpy(&overlay_list[screen][frame.sprite_count], overlay_sprites, (size_t)overlay_count * sizeof(dl_sprite));
+		frame.sprites = overlay_list[screen];
 		frame.overlay_from = frame.sprite_count;
 		frame.sprite_count += overlay_count;
 		frame.next_sprite_count = 0;
 	}
-	return &frame;
+}
+
+void dl_set_screens(int n)
+{
+	if (n > 1 && !lists1)
+	{
+		lists1 = malloc(2 * DL_MAX_SPRITES * sizeof(dl_sprite));
+		list_count1[0] = list_count1[1] = 0;
+	}
+	screens = n > 1 && lists1 ? 2 : 1;
+}
+
+int dl_screens(void)
+{
+	return screens;
+}
+
+const dl_frame *dl_build(void)
+{
+	build_one(0);
+	if (screens > 1)
+		build_one(1);
+	mix_screen = 0;
+	return &frames[0];
+}
+
+const dl_frame *dl_frame_of(int screen)
+{
+	return &frames[screen & 1];
 }
 
 /* ---- cell access for texture builders ---- */

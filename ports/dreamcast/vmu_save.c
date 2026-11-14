@@ -22,6 +22,13 @@
 #define BACKUP_RAM_START 0x1f00
 #define BACKUP_RAM_SIZE  0xfa
 #define FILE_NAME        "ORUNNERS"
+#define GHOST_FILE       "ORGHOST"     /* TIME ATTACK's fastest run, sampled (console/ghost.c) */
+
+extern size_t console_ghost_export(uint8_t **result);
+extern bool console_ghost_import(const uint8_t *data, size_t size);
+extern uint32_t console_ghost_generation(void);
+extern void console_ghost_release(void);
+extern void (*console_ghost_reload)(void);
 
 typedef struct
 {
@@ -43,12 +50,78 @@ static semaphore_t work;
 static kthread_t *saver;
 static volatile int busy;
 
-static int vmu_path(char *path, size_t size)
+static int vmu_path_of(char *path, size_t size, const char *name)
 {
 	maple_device_t *dev = maple_enum_type(0, MAPLE_FUNC_MEMCARD);
 	if (!dev) return -1;
-	snprintf(path, size, "/vmu/%c%d/" FILE_NAME, 'a' + dev->port, dev->unit);
+	snprintf(path, size, "/vmu/%c%d/%s", 'a' + dev->port, dev->unit, name);
 	return 0;
+}
+
+static int vmu_path(char *path, size_t size)
+{
+	return vmu_path_of(path, size, FILE_NAME);
+}
+
+/* the ghost's file: written when a new fastest run is kept, read at boot */
+static uint8_t *ghost_out;
+static size_t ghost_out_size;
+static volatile int ghost_job;
+static uint32_t ghost_saved_generation;
+
+static int write_ghost(void)
+{
+	char path[64];
+	if (vmu_path_of(path, sizeof(path), GHOST_FILE) != 0) return -1;
+	vmu_pkg_t pkg;
+	memset(&pkg, 0, sizeof(pkg));
+	strcpy(pkg.desc_short, "OutRunners");
+	strcpy(pkg.desc_long, "OutRunners time attack ghost");
+	strcpy(pkg.app_id, "OUTRUNNERS_DC");
+	pkg.icon_cnt = 1;
+	pkg.icon_anim_speed = 0;
+	pkg.eyecatch_type = VMUPKG_EC_NONE;
+	memcpy(pkg.icon_pal, vmu_icon_palette, sizeof(pkg.icon_pal));
+	pkg.icon_data = (uint8_t *)vmu_icon_pixels;
+	pkg.data_len = (int)ghost_out_size;
+	pkg.data = ghost_out;
+	uint8_t *out = NULL;
+	int out_size = 0;
+	if (vmu_pkg_build(&pkg, &out, &out_size) < 0 || !out) return -1;
+	int ok = -1;
+	file_t f = fs_open(path, O_WRONLY | O_TRUNC);
+	if (f != FILEHND_INVALID)
+	{
+		if (fs_write(f, out, (size_t)out_size) == out_size) ok = 0;
+		if (fs_close(f) != 0) ok = -1;
+	}
+	free(out);
+	return ok;
+}
+
+static void load_ghost(void)
+{
+	char path[64];
+	if (vmu_path_of(path, sizeof(path), GHOST_FILE) != 0) return;
+	file_t f = fs_open(path, O_RDONLY);
+	if (f == FILEHND_INVALID) return;
+	const ssize_t size = (ssize_t)fs_total(f);
+	uint8_t *buf = size > 16 && size < 160 * 1024 ? malloc((size_t)size) : NULL;
+	if (buf && fs_read(f, buf, (size_t)size) == size)
+	{
+		/* (as the settings: the data alone, or a whole package) */
+		if (memcmp(buf, "ORGS", 4) == 0)
+			(void)console_ghost_import(buf, (size_t)size);
+		else
+		{
+			vmu_pkg_t pkg;
+			if (vmu_pkg_parse(buf, (size_t)size, &pkg) == 0 && pkg.data_len > 16)
+				(void)console_ghost_import(pkg.data, (size_t)pkg.data_len);
+		}
+	}
+	free(buf);
+	fs_close(f);
+	ghost_saved_generation = console_ghost_generation();
 }
 
 static void current(save_data *d)
@@ -99,6 +172,16 @@ static void *saver_main(void *arg)
 	for (;;)
 	{
 		sem_wait(&work);
+		if (ghost_job)
+		{
+			if (write_ghost() == 0)
+				dc_vmu_state += 1u << 8;
+			else
+				dc_vmu_state += 1u << 24;
+			ghost_job = 0;
+			busy = 0;
+			continue;
+		}
 		if (write_save(&pending) == 0)
 		{
 			saved = pending;
@@ -109,6 +192,40 @@ static void *saver_main(void *arg)
 		busy = 0;
 	}
 	return NULL;
+}
+
+/* A new fastest run the VMU has not got, not yet turned down: the port asks whether to save it (main.c) */
+static bool ghost_save_wanted;
+static uint32_t ghost_declined_generation;
+
+bool dc_vmu_ghost_offer(void)
+{
+	const uint32_t g = console_ghost_generation();
+	return g != ghost_saved_generation && g != ghost_declined_generation && maple_enum_type(0, MAPLE_FUNC_MEMCARD) != NULL;
+}
+
+void dc_vmu_ghost_answer(bool save)
+{
+	if (save)
+		ghost_save_wanted = true;
+	else
+		ghost_declined_generation = console_ghost_generation();
+}
+
+/* TIME ATTACK starting with the run released (2 PLAYERS was played): read again, unless the saver is writing */
+static void reload_ghost(void)
+{
+	if (busy) return;
+	load_ghost();
+}
+
+/* 2 PLAYERS: the fastest run's memory back, always (a run not saved is gone; the VMU's is read again for
+   TIME ATTACK). A save asked for is made first: its sampled copy is the saver's own, so the run can go then */
+void dc_vmu_ghost_release(void)
+{
+	if (ghost_save_wanted) return;
+	console_ghost_release();
+	ghost_declined_generation = ghost_saved_generation = console_ghost_generation();    /* (nothing to offer) */
 }
 
 int dc_vmu_load(void)
@@ -175,6 +292,8 @@ int dc_vmu_load(void)
 		}
 		dc_vmu_state |= why;
 	}
+	load_ghost();
+	console_ghost_reload = reload_ghost;
 	if (result != 1) current(&saved);    /* (nothing to compare against yet: the first change is saved) */
 	dc_vmu_state = (dc_vmu_state & 0xf0u) | (uint32_t)(result + 2);
 	return result;
@@ -189,7 +308,25 @@ static uint32_t last_save_frame;
 
 void dc_vmu_frame(uint32_t frame)
 {
-	if (frame % 600 != 0 || busy || !saver)
+	if (busy || !saver)
+		return;
+	if (ghost_save_wanted)
+	{
+		/* the player's SAVE GHOST: the run to the VMU, sampled (made here, written by the saver thread) */
+		ghost_save_wanted = false;
+		ghost_saved_generation = console_ghost_generation();
+		free(ghost_out);
+		ghost_out = NULL;
+		ghost_out_size = console_ghost_export(&ghost_out);
+		if (ghost_out_size)
+		{
+			ghost_job = 1;
+			busy = 1;
+			sem_signal(&work);
+		}
+		return;
+	}
+	if (frame % 600 != 0)
 		return;
 	current(&pending);
 	if (memcmp(&pending, &saved, sizeof(pending)) == 0)

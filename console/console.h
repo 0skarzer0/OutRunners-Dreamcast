@@ -78,6 +78,7 @@ enum
 };
 
 size_t console_pause_sprites(uint8_t *list, size_t room, int choice);
+size_t console_prompt_sprites(uint8_t *list, size_t room, const char *title, const char *const *items, int count, int choice);
 
 /* The route map beside the race: the port says each frame whether it has room for it (a tall screen's room
    under the picture); the right seat, unseen with one player, shows it then while the left one races, and
@@ -223,6 +224,15 @@ int console_wide_side(void);
 
 /* The folder TIME ATTACK keeps its ghosts in (ghost_0.bin to ghost_9.bin, a goal each), with its separator */
 void console_ghost_folder(const char *folder);
+
+/* TIME ATTACK's fastest run, for a machine that keeps it elsewhere (the Dreamcast: a VMU file): sampled, a
+   few times a second, into a malloc'd buffer (0: none), read back (false: not a run), and a count that
+   changes when a new fastest run is kept */
+size_t console_ghost_export(uint8_t **result);
+bool console_ghost_import(const uint8_t *data, size_t size);
+uint32_t console_ghost_generation(void);
+void console_ghost_release(void);         /* (its memory back; read again through console_ghost_reload) */
+extern void (*console_ghost_reload)(void);
 
 /* The network game (NETWORK: rooms of up to four devices, network.c): the port runs it once each of its frames
    (60 a second), the game's frame run or not. While a race of it waits for a device unheard (true while

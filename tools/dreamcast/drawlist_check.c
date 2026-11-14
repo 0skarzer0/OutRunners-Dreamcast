@@ -380,12 +380,19 @@ void dl_install_check_hooks(void)
 #include "../../ports/dreamcast/pvr/pal4_twiddle.h"
 #include "../../ports/dreamcast/pvr/frame_hash.h"
 
+/* RT_COST_NS (rt_check_frame): the work clock */
+static uint64_t cost_ns, cost_per_texel;
+static uint64_t cost_clock(void) { return cost_ns / 1000; }
 #define HT_MAX 4096
 typedef struct { uint16_t *px; int w, h; bool pal4; } host_tex;
 static host_tex htex[HT_MAX];
 static size_t ht_bytes, ht_budget = 5u << 20;    /* (texture memory left beside frame buffers and TA) */
-static uint32_t rt_rgb[DL_HEIGHT][DL_WIDTH];
-static float rt_depth[DL_HEIGHT][DL_WIDTH];
+static uint32_t rt_rgb_s[2][DL_HEIGHT][DL_WIDTH];
+static float rt_depth_s[2][DL_HEIGHT][DL_WIDTH];
+static int hv;    /* (the screen being drawn: the backend's view) */
+#define rt_rgb rt_rgb_s[hv]
+#define rt_depth rt_depth_s[hv]
+static void ht_view(int screen) { hv = screen; }
 
 static int ht_alloc(int w, int h)
 {
@@ -419,6 +426,7 @@ static int ht_alloc_pal4(int w, int h)
 static void ht_write_pal4(int t, int y, int h, const uint8_t *idx, int stride)
 {
 	if (!htex[t].pal4 || (y & 1) || (h & 1)) { fprintf(stderr, "bad paletted write tex %d y %d h %d\n", t, y, h); abort(); }
+	cost_ns += cost_per_texel * (uint64_t)(htex[t].w * h) / 2;
 	pal4_write_rows(htex[t].px, htex[t].w, htex[t].h, y, h, idx, stride);
 }
 static void ht_pal_set(int bank, const uint16_t colours[16]) { memcpy(&ht_palette[bank * 16], colours, 32); }
@@ -431,8 +439,11 @@ static void ht_free(int t)
 	htex[t].px = NULL;
 }
 
+/* RT_COST_NS=n: a clock that runs only with the work a console would do, n ns a texel written, so a build
+   with RT_BUILD_US spreads its builds over frames as the console's would (roughly) */
 static void ht_write(int t, int x, int y, int w, int h, const uint16_t *src, int stride)
 {
+	cost_ns += cost_per_texel * (uint64_t)(w * h);
 	for (int j = 0; j < h; j++)
 		memcpy(&htex[t].px[(y + j) * htex[t].w + x], &src[j * stride], (size_t)w * 2);
 }
@@ -528,16 +539,18 @@ static void ht_solid(uint16_t c, float x0, float y0, float x1, float y1, float z
    sprite texture over frames, CHUNK rows a frame (the console's resumed builds, checked here) */
 static uint64_t fake_clock(void) { static uint64_t t; return t += 1000; }
 /* translucent quads of one colour: after the frame's opaque quads, as the PowerVR's translucent list */
-static struct { float x0, y0, x1, y1, z; uint32_t argb; } tints[64];
+static struct { float x0, y0, x1, y1, z; uint32_t argb; int sc; } tints[64];
 static int tint_count;
 static void ht_tint(float x0, float y0, float x1, float y1, float z, uint32_t argb)
 {
 	if (tint_count < 64) { tints[tint_count].x0 = x0; tints[tint_count].y0 = y0; tints[tint_count].x1 = x1; tints[tint_count].y1 = y1;
-		tints[tint_count].z = z; tints[tint_count++].argb = argb; }
+		tints[tint_count].z = z; tints[tint_count].sc = hv; tints[tint_count++].argb = argb; }
 }
 static void ht_tints_flush(void)
 {
 	for (int i = 0; i < tint_count; i++)
+	{
+		hv = tints[i].sc;
 		for (int y = (int)tints[i].y0; y < (int)tints[i].y1; y++)
 			for (int x = (int)tints[i].x0; x < (int)tints[i].x1; x++)
 			{
@@ -548,17 +561,43 @@ static void ht_tints_flush(void)
 					out |= ((((c >> (8 * ch)) & 255) * (255 - a) + ((tints[i].argb >> (8 * ch)) & 255) * a) / 255 & 0xf8) << (8 * ch);
 				rt_rgb[y][x] = out;
 			}
+	}
+	hv = 0;
 	tint_count = 0;
 }
-static rt_backend host_backend = { ht_alloc, ht_free, ht_write, ht_quad, ht_shadow, ht_solid, NULL, NULL, NULL, NULL, NULL, ht_tint };
+/* a ghost: its texels half over what is under them, drawn as the frame's quads come (the console's
+   translucent list comes after the opaque ones; close enough for a check) */
+static void ht_quad_alpha(int t, int bank, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
+	float z, uint32_t mod, uint32_t add, int alpha)
+{
+	static uint32_t under[DL_HEIGHT][DL_WIDTH];
+	static float under_z[DL_HEIGHT][DL_WIDTH];
+	(void)alpha;
+	memcpy(under, rt_rgb, sizeof(under));
+	memcpy(under_z, rt_depth, sizeof(under_z));
+	quad_bank_now = bank;
+	ht_quad(t, false, x0, y0, x1, y1, u0, v0, u1, v1, z, mod, add);
+	quad_bank_now = -1;
+	for (int y = (int)y0; y < (int)y1; y++)
+		for (int x = (int)x0; x < (int)x1; x++)
+			if (y >= 0 && y < DL_HEIGHT && x >= 0 && x < DL_WIDTH && rt_rgb[y][x] != under[y][x])
+			{
+				const uint32_t a = rt_rgb[y][x], b = under[y][x];
+				rt_rgb[y][x] = ((((a & 0xff00ff) + (b & 0xff00ff)) >> 1) & 0xff00ff | (((a & 0xff00) + (b & 0xff00)) >> 1) & 0xff00) & 0xf8f8f8;
+				rt_depth[y][x] = under_z[y][x];
+			}
+}
+static rt_backend host_backend = { ht_alloc, ht_free, ht_write, ht_quad, ht_shadow, ht_solid, NULL, NULL, NULL, NULL, NULL, ht_tint, ht_quad_alpha, ht_view };
 
 void rt_check_frame(uint64_t number)
 {
 	static bool ready;
 	static FILE *out;
 	if (!ready) { if (getenv("RT_HOST_BUDGET")) ht_budget = (size_t)strtoul(getenv("RT_HOST_BUDGET"), NULL, 0); if (getenv("RT_FAKE_CLOCK")) host_backend.clock_us = fake_clock;
+		if (getenv("RT_COST_NS")) { cost_per_texel = strtoull(getenv("RT_COST_NS"), NULL, 10); host_backend.clock_us = cost_clock; }
+		{ extern bool rt_low_2p; if (getenv("RT_LOW_2P")) rt_low_2p = atoi(getenv("RT_LOW_2P")) != 0; }
 		if (getenv("RT_HOST_PAL4")) { host_backend.tex_alloc_pal4 = ht_alloc_pal4; host_backend.tex_write_pal4 = ht_write_pal4; host_backend.pal_set = ht_pal_set; host_backend.quad_pal = ht_quad_pal; } rt_init(&host_backend); ready = true; out = fopen(getenv("RT_CHECK_OUT"), "w");
-		if (out) fprintf(out, "frame,mismatch,quads,cells,built,hits,evictions,banks_changed,skipped,tex_fail,tex_bytes,offsets,pal_sprites,banks_full\n"); }
+		if (out) fprintf(out, "frame,mismatch,quads,cells,built,hits,evictions,banks_changed,skipped,tex_fail,tex_bytes,offsets,pal_sprites,banks_full,missing,missing_px,fallback,deferred,pending,cells_late,previews,screens,mismatch1\n"); }
 #ifdef ORUNNERS_CONSOLE
 	{
 		/* RT_PAUSE_FRAME=n: frame n as the Dreamcast's pause shows it (the pause's words through dl_overlay) */
@@ -570,7 +609,93 @@ void rt_check_frame(uint64_t number)
 			dl_overlay(NULL, 0);
 	}
 #endif
+	if (getenv("RT_LAYER_LOG") && number % 300 == 0)
+	{
+		/* each screen's mixer: the layers' priorities and palette bases, the sprites' */
+		fprintf(stderr, "L %llu", (unsigned long long)number);
+		for (int sc = 0; sc < 2; sc++)
+		{
+			fprintf(stderr, " | scr%d on%d", sc, s32_display_enabled(sc));
+			for (int i = 0; i < 6; i++)
+			{
+				const uint16_t c = s32_board.mixer[sc][(0x20 + 2 * i) / 2];
+				fprintf(stderr, " L%d:p%d/b%03x", i, c & 15, (c & 0xf0) << 6);
+			}
+		}
+		fprintf(stderr, "\n");
+	}
+#ifdef ORUNNERS_CONSOLE
+	{
+		extern bool console_both_screens(void);
+		dl_set_screens(console_both_screens() ? 2 : 1);
+	}
+#endif
 	const dl_frame *f = dl_build();
+	const int nscreens = dl_screens();
+	{
+		extern bool rt_ring_planes;
+		rt_ring_planes = nscreens > 1;
+	}
+	const dl_frame *fs[2] = { f, dl_frame_of(1) };
+	if (getenv("RT_PLANE_CENSUS"))
+	{
+		/* each tile plane in use: the colour banks of its cells in sight, and the narrowest run of columns
+		   (round the plane's 64) holding every cell in sight, and the same for rows (32) */
+		static FILE *pc;
+		if (!pc) pc = fopen(getenv("RT_PLANE_CENSUS"), "w");
+		for (int sc = 0; sc < nscreens; sc++)
+			for (int layer = DL_NBG0; layer <= DL_NBG3; layer++)
+			{
+				if (!fs[sc]->layers[layer].on) continue;
+				const dl_plane *pl = &fs[sc]->planes[layer];
+				uint64_t cols = 0; uint32_t rows = 0; static uint8_t bank_seen[512]; int banks = 0;
+				memset(bank_seen, 0, sizeof(bank_seen));
+				uint64_t vis[32]; memset(vis, 0, sizeof(vis));
+				for (int y = 0; y < DL_HEIGHT; y++)
+				{
+					const int cy = (pl->sy[y] >> 4) & 31;
+					for (int i = 0; i < pl->span_count[y]; i++)
+					{
+						const int first = (pl->sx[y] + pl->spans[y][i][0]) & 0x3ff, count = pl->spans[y][i][1] - pl->spans[y][i][0];
+						for (int c = first >> 4; c <= (first + count - 1) >> 4; c++) { vis[cy] |= 1ull << (c & 63); cols |= 1ull << (c & 63); }
+						rows |= 1u << cy;
+					}
+				}
+				int pages[4], bank;
+				dl_plane_pages(layer, pages, &bank);
+				for (int cy = 0; cy < 32; cy++) for (int cx = 0; cx < 64; cx++) if (vis[cy] >> cx & 1)
+				{
+					const int page = pages[((cy >> 4) & 1) * 2 + ((cx >> 5) & 1)];
+					const uint16_t cell = dl_video_word((uint32_t)page << 9 | (uint32_t)(cy & 15) << 5 | (uint32_t)(cx & 31));
+					const int colour = (cell >> 4) & 0x1ff;
+					if (!bank_seen[colour]) { bank_seen[colour] = 1; banks++; }
+				}
+				/* narrowest circular cover: 64 - the longest run of columns not in sight */
+				int gap = 0, run = 0;
+				for (int k = 0; k < 128; k++) { if (cols >> (k & 63) & 1) run = 0; else if (++run > gap) gap = run; }
+				if (gap > 64) gap = 64;
+				int rgap = 0; run = 0;
+				for (int k = 0; k < 64; k++) { if (rows >> (k & 31) & 1) run = 0; else if (++run > rgap) rgap = run; }
+				if (rgap > 32) rgap = 32;
+				if (pc) fprintf(pc, "%llu,%d,%d,%d,%d,%d\n", (unsigned long long)number, sc, layer, banks, 64 - gap, 32 - rgap);
+			}
+	}
+	if (getenv("RT_FRAME_LOG") && number >= strtoull(getenv("RT_FRAME_LOG"), NULL, 10) && number < strtoull(getenv("RT_FRAME_LOG"), NULL, 10) + 48)
+		for (int sc = 0; sc < nscreens; sc++)
+		{
+			fprintf(stderr, "F%llu ", (unsigned long long)number);
+			for (int i = 0; i < fs[sc]->sprite_count; i++)
+			{
+				const dl_sprite *sp = &fs[sc]->sprites[i];
+				if ((int)sp->width * sp->height >= 2000)
+					fprintf(stderr, "  spr %d place %x %dx%d src %dx%d at %d,%d b8 %d shadow %d\n", i, sp->place, sp->width, sp->height, sp->words, sp->rows, sp->x, sp->y, sp->bits8, sp->shadow);
+			}
+			fprintf(stderr, "screen %d (%d) on %d:", sc, fs[sc]->screen, fs[sc]->display_on);
+			for (int i = 0; i < DL_LAYERS; i++)
+				fprintf(stderr, " L%d on%d p%d b%x s%d plane%d", i, fs[sc]->layers[i].on, fs[sc]->layers[i].priority, fs[sc]->layers[i].palette_base,
+					fs[sc]->layers[i].screen, i < DL_SPRITES ? fs[sc]->planes[i].on : -1);
+			fprintf(stderr, " sprites %d\n", fs[sc]->sprite_count);
+		}
 	if (number % FRAME_HASH_EVERY == 0 && getenv("RT_HASH_OUT"))
 	{
 		static FILE *hf;
@@ -578,9 +703,11 @@ void rt_check_frame(uint64_t number)
 		if (hf) { fprintf(hf, "H%llu %08X %08X\n", (unsigned long long)number, frame_hash_board(), frame_hash_list(f)); fflush(hf); }
 	}
 	rt_stats s;
-	for (int y = 0; y < DL_HEIGHT; y++)
-		for (int x = 0; x < DL_WIDTH; x++) { rt_depth[y][x] = 0; rt_rgb[y][x] = 0; }
-	rt_frame(f, &s);
+	memset(rt_rgb_s, 0, sizeof(rt_rgb_s));
+	memset(rt_depth_s, 0, sizeof(rt_depth_s));
+	hv = 0;
+	rt_frame_n(fs, nscreens, &s);
+	hv = 0;
 	ht_tints_flush();
 	if (getenv("RT_SPRITE_PAGES"))
 	{
@@ -619,17 +746,28 @@ void rt_check_frame(uint64_t number)
 	}
 	int width;
 	const uint32_t *ref = s32_video_frame(0, &width);
-	uint32_t mismatch = 0;
+	uint32_t mismatch = 0, corner = 0;
 	for (int y = 0; y < DL_HEIGHT; y++)
 		for (int x = 0; x < DL_WIDTH; x++)
-			if (rt_rgb[y][x] != (ref[y * S32_VIDEO_MAX_WIDTH + x] & 0xf8f8f8)) mismatch++;
+			if (rt_rgb[y][x] != (ref[y * S32_VIDEO_MAX_WIDTH + x] & 0xf8f8f8)) { mismatch++; if (y >= 120 && (x < 40 || x >= 280)) corner++; }
+	uint32_t mismatch1 = 0;
+	if (nscreens > 1)
+	{
+		const uint32_t *ref1 = s32_video_frame(1, &width);
+		for (int y = 0; y < DL_HEIGHT; y++)
+			for (int x = 0; x < DL_WIDTH; x++)
+				if (rt_rgb_s[1][y][x] != (ref1[y * S32_VIDEO_MAX_WIDTH + x] & 0xf8f8f8)) mismatch1++;
+	}
+	if (getenv("RT_CORNER_LOG") && corner >= (uint32_t)atoi(getenv("RT_CORNER_LOG")))
+		fprintf(stderr, "C %llu %u\n", (unsigned long long)number, corner);
 	if (out)
 	{
 		int offsets = 0;
 		for (int i = 0; i < 2; i++) for (int c = 0; c < 3; c++) offsets |= f->offsets[i][c] != 0;
-		fprintf(out, "%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%zu,%d,%u,%u\n", (unsigned long long)number, mismatch, s.quads, s.cells_converted,
+		fprintf(out, "%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%zu,%d,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u\n", (unsigned long long)number, mismatch, s.quads, s.cells_converted,
 			s.sprite_textures_built, s.sprite_cache_hits, s.sprite_evictions, s.palette_banks_changed, s.skipped,
-			s.texture_memory_failures, ht_bytes, offsets, s.pal_sprites, s.pal_banks_full);
+			s.texture_memory_failures, ht_bytes, offsets, s.pal_sprites, s.pal_banks_full, s.sprites_missing, s.missing_px,
+			s.sprites_fallback, s.sprites_deferred, s.sprites_pending, s.plane_cells_late, s.sprites_preview, nscreens, mismatch1);
 	}
 	const char *dir = getenv("DL_CHECK_DUMP"), *list = getenv("DL_CHECK_FRAMES");
 	if (dir && list)
@@ -639,9 +777,15 @@ void rt_check_frame(uint64_t number)
 		snprintf(padded, sizeof(padded), ",%s,", list);
 		if (strstr(padded, key))
 		{
-			memcpy(out_rgb, rt_rgb, sizeof(out_rgb));
+			memcpy(out_rgb, rt_rgb_s[0], sizeof(out_rgb));
 			snprintf(path, sizeof(path), "%s/rt_%llu.bmp", dir, (unsigned long long)number);
 			write_bmp(path, ref, S32_VIDEO_MAX_WIDTH);
+			if (nscreens > 1)
+			{
+				memcpy(out_rgb, rt_rgb_s[1], sizeof(out_rgb));
+				snprintf(path, sizeof(path), "%s/rt1_%llu.bmp", dir, (unsigned long long)number);
+				write_bmp(path, s32_video_frame(1, &width), S32_VIDEO_MAX_WIDTH);
+			}
 		}
 	}
 }

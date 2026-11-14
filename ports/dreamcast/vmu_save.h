@@ -12,5 +12,8 @@ extern bool dc_options_loaded;
    sound board's RAM: the course records, bookkeeping and credits) in a file on the first VMU found. */
 int dc_vmu_load(void);       /* at boot, before program_reset: 1 loaded, 0 none there, -1 no VMU */
 void dc_vmu_frame(uint32_t frame);    /* each frame: a changed copy goes to the VMU (in the background) */
-extern volatile uint32_t dc_vmu_state;    /* bits 0-1 load result + 1, bits 8-23 saves written, 24-31 save failures */
+extern volatile uint32_t dc_vmu_state;
+void dc_vmu_ghost_release(void);
+bool dc_vmu_ghost_offer(void);              /* (a new fastest TIME ATTACK run to offer to save) */
+void dc_vmu_ghost_answer(bool save);        /* (the player's answer: saved in the background, or not asked again) */    /* (2 PLAYERS: TIME ATTACK's run out of memory, read again later) */    /* bits 0-1 load result + 1, bits 8-23 saves written, 24-31 save failures */
 #endif

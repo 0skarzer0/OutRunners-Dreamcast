@@ -184,6 +184,22 @@ size_t console_pause_sprites(uint8_t *list, size_t room, int choice)
 	return at + 16u;
 }
 
+/* A question the port asks over a stopped frame, as the pause's: a title and its choices, one of them
+   chosen (the Dreamcast's SAVE GHOST at the end of a TIME ATTACK run) */
+size_t console_prompt_sprites(uint8_t *list, size_t room, const char *title, const char *const *items, int count, int choice)
+{
+	size_t at = 0;
+
+	if (room < 16u)
+		return 0;
+	at = pause_line(list, at, room, PAUSE_Y, 2, PAUSE_CHOSEN, title);
+	for (int item = 0; item < count; item++)
+		at = pause_line(list, at, room, PAUSE_LINES_Y + item * PAUSE_LINE_STEP, 1, item == choice ? PAUSE_CHOSEN : PAUSE_TEXT, items[item]);
+	memset(&list[at], 0, 16);
+	list[at + 1] = (uint8_t)(SPRITE_END >> 8);
+	return at + 16u;
+}
+
 /* The network's race waiting for a device unheard (network.c) */
 size_t console_network_wait_sprites(uint8_t *list, size_t room)
 {

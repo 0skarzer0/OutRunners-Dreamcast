@@ -218,14 +218,21 @@ static uint32_t rate_reg(const multipcm_voice *voice, int value)
    output (left for one seat, right for the other), so with one console and one player a race's music
    came from one speaker. As the PC port does (sound_chips_join_sides), both sides go to both speakers:
    every voice is centred. DC_AICA_CABINET_PAN: the board's own panning. */
+bool dc_aica_cabinet_pan;    /* (2 PLAYERS: each seat's sound on its own side) */
 static uint32_t pan_reg(const multipcm_voice *voice)
 {
 #ifndef DC_AICA_CABINET_PAN
-	(void)voice;
-	return 0;
+	if (!dc_aica_cabinet_pan)
+		return 0;
 #endif
 	const int pan = (int)(voice->pan & 0xf);
 	if (pan == 0) return 0;
+#ifndef DC_AICA_CABINET_PAN
+	/* 2 PLAYERS: screen 1's sounds (pan 1-7) wholly on the left speaker, screen 2's (9-F) on the right
+	   (the AICA's DIPAN 1F the left alone, 0F the right alone, as KOS's AICA_PAN); the music, keyed on in
+	   the middle (sound_seats_split), stays there */
+	return pan < 8 ? 0x1f : 0x0f;
+#endif
 	if (pan < 8) return (pan & 7) == 7 ? 0x0f : (uint32_t)pan * 1u;          /* left quieter */
 	return (pan & 7) == 1 ? 0x1f : 0x10u | (uint32_t)(16 - pan);              /* right quieter */
 }

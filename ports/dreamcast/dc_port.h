@@ -6,6 +6,7 @@
 
 void dc_controls_update(void);
 bool dc_exit_requested(void);
+void dc_exit_clear(void);    /* (the soft reset done) */
 void dc_present_frame(void);
 void dc_status(const char *msg);
 void dc_status_off(void);
