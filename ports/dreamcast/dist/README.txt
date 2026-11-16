@@ -1,4 +1,4 @@
-OutRunners for Dreamcast - version 0.3
+OutRunners for Dreamcast - version 0.4
 =====================================
 
 A native Dreamcast port of the OutRunners arcade game, built on the C reconstruction of the game
@@ -45,7 +45,8 @@ The title screen has the PC version's menu (press Start):
                           see-through ghost car), FULL (all the stages in one race),
                           REVERSE (from a goal back to the start)
     OPTIONS               DIFFICULTY, TIME, VOLUME, SOUND TEST, STEERING (the stick's dead zone and
-                          sensitivity, the D-pad's steering speed, vibration, an input test), FPS
+                          sensitivity, the D-pad's steering speed, vibration, an input test), FPS,
+                          2P MUSIC (in 2 PLAYERS, player 1's radio alone or both)
 In a race, Start pauses: CONTINUE, RESTART or QUIT GAME.
 
 DIFFICULTY sets the traffic and rivals; TIME sets the seconds each stage gives you. If the arcade
@@ -80,7 +81,9 @@ Controls (Dreamcast controller)
     A / B                 gear shift; in the menus A picks a line and B goes back
     Start                 start; picks a line in the menus; pauses a race
     Y                     music select
-    D-pad up / down       previous / next music (every car can play all ten songs)
+    D-pad up / down       previous / next music (every car can play all ten songs; the hidden
+                          Jingle Bell is on the way round, between Last Wave and Magical Sound
+                          Shower)
     A + B + X + Y + Start soft reset: ends the game and goes back to the title
 A vibration pack shakes when the cabinet's wheel motor would (a crash, off the road). The second
 controller has the same controls for the second player.
@@ -109,9 +112,12 @@ The PC port runs the arcade game's logic and draws every frame in software, whic
 does without effort. A Dreamcast has a 200 MHz processor, 16 MB of memory and 8 MB of video memory,
 and the game's graphics and sound alone are several times that. Most of this port is the work of
 fitting it in and keeping it at 60 frames a second:
-- The picture is not drawn in software. The arcade board's tile planes and sprites are turned into
-  PowerVR textures and quads each frame, with sprite textures built, cached and thrown out as the
-  scenery goes by, and 16-colour textures sharing palettes so one drawing serves every colour.
+- The picture is not drawn in software. Most of the arcade board's tile planes are drawn cell by cell
+  from a store of the tiles' 16-colour graphics in video memory, the PowerVR colouring them from its
+  palette memory, so a change of colours costs nothing; the sky and ground, whose lines scroll one
+  by one, are kept as textures and only the cells that change are redone. Sprites are PowerVR
+  textures, built, cached and thrown out as the scenery goes by, 16-colour ones sharing palettes so
+  one drawing serves every colour.
 - The graphics and samples stay compressed on the disc and are read in small pieces while you play,
   in the background, so the race never waits for the disc.
 - The arcade's sound board (its own processor and sample chip) is still run, but its samples are
@@ -128,11 +134,13 @@ Dreamcast, that is a bug worth reporting.
 
 Status
 ------
-Version 0.3: 2 PLAYERS, Time Attack ghosts saved to the VMU, Niagara's mist steady, large distant
-scenery drawn from a half-resolution copy while its full texture is built (no more blinking), soft
-reset. Played on a Dreamcast with GDEMU during development.
-Known gaps: in the busiest stretches the picture can drop a frame to keep the game and its music at
-full speed, and 2 PLAYERS is busier still (it can run below full speed); where a stage's colours
-change, the ground and road at the screen's edges can show blocks of the old colours for a moment;
-FM sound and sound LFOs are not reproduced; no NETWORK.
-
+Version 0.4: a large rework of the drawing for speed. Most background planes are drawn straight from
+a tile store with the PowerVR's palettes, the planes look only at what changed each frame, the sound
+board's program runs about a third faster, and sprites find their textures and palettes far more
+cheaply: in one player a race now leaves roughly half of each frame spare. The garbage at the road's
+edges where a stage's colours change is almost gone. From the PC version (Sebastian Toyos, cheviman):
+Jingle Bell on the radio, REVERSE's and FULL's backgrounds and colours, REVERSE's finish, QUIT GAME
+stopping the race's sound, the route map's land under the sea and landmarks, 2P MUSIC, and the
+decompiled game's latest code.
+Known gaps: an occasional frame can still be dropped to keep the game and its music at full speed,
+more often in 2 PLAYERS, which draws large scenery at half resolution; no NETWORK.

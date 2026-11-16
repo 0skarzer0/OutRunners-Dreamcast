@@ -3,7 +3,7 @@
  *    Description: runs the decompiled sound program on the board's time: the Z80's timing model
  *    Version:     0.1.0
  *    Created:     13-10-2026
- *    Modified:    21-10-2026
+ *    Modified:    13-11-2026
  *    Author:      Sebastian Toyos
  *
  *    license:BSD-3-Clause
@@ -27,6 +27,7 @@
  */
 #include "sound/support.h"
 #include "sound/chips.h"
+#include "s32/byte_order.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,18 +63,23 @@ void sound_reset(void);
 void sound_irq(void);
 void sound_main_loop(void);
 
-static struct
+s32_z80_state s32_z80 = { .held = true };
+#define z80 s32_z80
+
+/* the gate (support.h): the next timer's end, or now while an interrupt may be taken */
+static void set_gate(void)
 {
-	uint64_t clock;         /* where the next block starts, Z80 cycles */
-	bool interrupts;        /* IFF1 */
-	bool after_ei;          /* EI ended the block before */
-	bool line;              /* the board's interrupt line to the Z80 */
-	bool held;              /* in reset */
-	bool running;           /* past the reset code: the main loop runs */
-	uint32_t refresh;       /* opcode fetches so far */
-	uint32_t block_refresh; /* ... when the block started */
-	uint64_t block_start;   /* the clock when the block started */
-} z80 = { 0, false, false, false, true, false, 0, 0, 0 };
+	if (z80.line && z80.interrupts)
+		z80.gate = 0;
+	else if (sound_chips_next_deadline >= UINT64_MAX / 8)
+		z80.gate = UINT64_MAX;
+	else
+		z80.gate = z80_time(sound_chips_next_deadline);
+}
+void sound_cpu_deadline_changed(void) { set_gate(); }
+
+/* when the block being run makes its reads and writes (board cycles) */
+uint64_t sound_cpu_now(void) { return board_time(z80.block_start); }
 
 uint64_t sound_passes_run, sound_passes_skipped;    /* (main loop passes run, and counted without running) */
 #if defined(__linux__) && !defined(__DREAMCAST__)
@@ -91,9 +97,8 @@ static struct
 	uint32_t interrupts;    /* interrupts taken */
 } pass;
 
-void z80_block(int cycles, int fetches)
+void z80_block_board(int cycles, int fetches)
 {
-	/* (most blocks: no timer due and no interrupt to take, so none of the calls below) */
 	const uint64_t time = board_time(z80.clock);
 	if (time >= sound_chips_next_deadline || (z80.line && z80.interrupts && !z80.after_ei))
 	for (;;)
@@ -113,6 +118,7 @@ void z80_block(int cycles, int fetches)
 	z80.clock += (uint64_t)cycles;
 	z80.block_refresh = z80.refresh;
 	z80.refresh += (uint32_t)fetches;
+	set_gate();
 }
 
 uint8_t refresh_read(int fetches)
@@ -120,25 +126,17 @@ uint8_t refresh_read(int fetches)
 	return (uint8_t)((z80.block_refresh + (uint32_t)fetches) & 0x7f);
 }
 
-bool interrupts_enabled(void)
-{
-	return z80.interrupts;
-}
-
-void z80_cycles(int cycles)
-{
-	z80.clock += (uint64_t)cycles;
-}
-
 void interrupts_on(void)
 {
 	z80.interrupts = true;
+	set_gate();
 }
 
 void interrupts_on_after_block(void)
 {
 	z80.interrupts = true;
 	z80.after_ei = true;
+	set_gate();
 }
 
 void interrupts_off(void)
@@ -197,6 +195,8 @@ void move_block(uint16_t source, uint16_t destination, uint16_t count, bool upwa
 	for (uint32_t round = 0; round < rounds; round++)
 	{
 		s32_z80_write(destination, s32_z80_read(source));
+		if (source >= 0xe000 && destination >= 0xe000)    /* (a byte of the RAM to another: its place along) */
+			s32_order_moved(&s32_board.shared_ram[destination & 0x1fff], &s32_board.shared_ram[source & 0x1fff], 1);
 		source = (uint16_t)(upward ? source + 1 : source - 1);
 		destination = (uint16_t)(upward ? destination + 1 : destination - 1);
 	}
@@ -266,6 +266,7 @@ static void on_sound_irq(bool asserted, uint8_t vector)
 {
 	(void)vector;    /* interrupt mode 1: always 0038 */
 	z80.line = asserted;
+	set_gate();
 }
 
 static void on_sound_reset(bool held)

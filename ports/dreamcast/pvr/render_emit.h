@@ -45,6 +45,13 @@ typedef struct rt_backend
 		float u0, float v0, float u1, float v1, float z, uint32_t mod, uint32_t add, int alpha);
 	/* optional (NULL: one screen): the screen the quads from here on are for (0 the left, 1 the right) */
 	void (*view)(int screen);
+	/* optional (NULL: the tile planes are converted to 16-bit plane textures): a rectangle of a paletted
+	   texture (x, y, w, h even), and a palette bank's colours for the frame being made (applied before the
+	   frame is drawn, not while the one before it may still be drawing) */
+	void (*tex_write_pal4_rect)(int handle, int x, int y, int w, int h, const uint8_t *indices, int stride);
+	void (*pal_stage)(int bank, const uint16_t colours[16]);
+	/* Optional: a new texture made all clear (transparent), so no cell shows what the memory held before */
+	void (*tex_clear)(int handle);
 } rt_backend;
 
 #define RT_PAL_BANKS 64
@@ -73,9 +80,17 @@ typedef struct rt_stats
 	uint32_t sprites_preview;      /* previews built (large sprites drawn from a coarse copy while theirs is built) */
 	uint32_t missing_px;           /* screen pixels of sprites not drawn at all (host checks) */
 	uint32_t phase_us[5];          /* palette scan, plane textures, backdrop + plane strips, sprites, shadows */
+	uint32_t cells_margin;         /* tile cells beside those in sight redone ahead (margin_plane) */
+	uint32_t direct_quads;         /* tile planes drawn straight from the tile store: quads */
+	uint32_t direct_uploads;       /* tiles put in the tile store */
+	uint32_t direct_argb;          /* 16-bit (tile, colours) copies made, for banks without a palette slot */
+	uint32_t direct_banks;         /* palette slots in use for the planes */
+	uint32_t p1_us[4];             /* (test overlay) phase 1 split: text, tile planes, margin, getting planes ready and choosing */
+	uint32_t direct_runs;          /* (host checks) runs of the same cell along a line: quads if a tile were a texture of its own */
 } rt_stats;
 
 void rt_init(const rt_backend *backend);
+void rt_palettes_lost(void);    /* (after a change of video mode: the palette memory cleared) */
 /* Emits one frame (textures updated first, then quads). The backend must allow texture writes
    at this point (the previous frame's rendering finished). */
 void rt_frame(const dl_frame *frame, rt_stats *stats);

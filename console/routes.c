@@ -2,9 +2,9 @@
  *    Name:        routes.c
  *    Description: & KNUCKLES' routes: REVERSE, from a goal the player picks back to the pre-stage, and FULL,
  *                 the 31 stages one after another from the pre-stage to the last goal
- *    Version:     0.1.1
+ *    Version:     0.1.3
  *    Created:     29-10-2026
- *    Modified:    06-11-2026
+ *    Modified:    13-11-2026
  *    Author:      Sebastian Toyos
  *
  *    license:BSD-3-Clause
@@ -530,7 +530,7 @@ static int reverse_checkpoint_given(int checkpoint)
 {
 	static const uint8_t level_stages[GOAL_CHECKPOINT] = { 0x0D, 0x07, 0x03, 0x01, 0x00 };
 
-	return (stage_start_times[level_stages[checkpoint]] + game->master_time_difficulty[checkpoint]) * 0x1E;
+	return (stage_start_times[level_stages[checkpoint]] + game->race_copies[0].master_time_difficulty[checkpoint]) * 0x1E;
 }
 
 /* REVERSE's time at a checkpoint: the game's, less what the start gave beyond the game's start
@@ -736,8 +736,8 @@ bool console_routes_frame(uint32_t mode, uint32_t pressed)
 		}
 		routes.goal = routes.given_goal;
 		/* (the race's start: REVERSE_START_EXTRA more in the setting the car adds to its 40 seconds) */
-		routes.start_difficulty = game->master_time_difficulty[0];
-		game->master_time_difficulty[0] = (int8_t)(game->master_time_difficulty[0] + REVERSE_START_EXTRA);
+		routes.start_difficulty = game->race_copies[0].master_time_difficulty[0];
+		game->race_copies[0].master_time_difficulty[0] = (int8_t)(routes.start_difficulty + REVERSE_START_EXTRA);
 		routes.time_given = false;
 	}
 	screen->first_stage = (uint8_t)routes.goal;
@@ -801,12 +801,6 @@ void road_object_stream_read(void)
 	original_road_object_stream_read();
 }
 
-/* WIDE's background through a change: whole. A change's page words are a set of four (background_page_words):
-   the coming background whole, then its left and its right column swapped for the next one's (with a page
-   that joins them), then the next one whole; the game swaps each column while the view's turn keeps it out of
-   its 320 columns, which WIDE's sides show. The sides keep the whole one shown in the middle instead: the
-   first of the set through the left column's swap, the last from the right one's on (the palettes' fades
-   cover the change, as the game's) */
 /* The background's page word, as the game writes it: its two halves, the upper pages the low one */
 static uint32_t page_word(const struct tilemap_pages *pages)
 {
@@ -819,20 +813,61 @@ static void set_page_word(struct tilemap_pages *pages, uint32_t word)
 	pages->lower_pages = (uint16_t)(word >> 16u);
 }
 
-static void wide_background_pages(uint32_t pages_before)
+/* WIDE's background through a change: the game's own, its last two swaps once WIDE's sides are past them too.
+   A change's page words are a set of four (background_page_words), one a step of the view's turn away and
+   back: the background the race leaves, whole (the first four of the new one's nine pages); with the turn
+   past 2A0, the column it has taken out of sight swapped, its upper page for one that joins the two
+   backgrounds (the one the view comes back over: the change itself) and its lower page for the new one's;
+   back at 160, the other column for the new one's; at 60, the joining page for the new one's own, the same
+   in the half still in sight. Those turns are the 320 columns' (the view is 160 at each side of the turn),
+   so WIDE's sides showed the last two swaps half done (the clouds cut): here their page words wait until the
+   turn is back the side's columns more, where the wider view is past the column too. The first cannot wait
+   (the turn reaches about 2A8): the columns a side shows of its column change as the game swaps it, to the
+   joining page's, which goes on from the other column as the old one did. On a route's change that takes the
+   other set (turn_background_pages) the joining page is in the column it was not drawn for and its swap for
+   the new one's shows in the 320 columns whenever it comes: that one does not wait, the middle as 4:3's */
+static struct waiting_page_word
+{
+	uint32_t object;    /* the background whose page word waits (its address), or 0 */
+	uint32_t word;      /* the page word the game wrote */
+	int turn;           /* the turn it waits for: this at most */
+	bool other_set;     /* the change's set is the turn's, not its background's own */
+} wide_page_words[2];   /* by screen */
+
+/* 'starting': the background was being set up (a race's first frame); 'changing': it was in a change, its
+   page word 'pages_before' then; 'other_set': the turn took the change's other set this frame */
+static void wide_background_pages(bool starting, bool changing, bool other_set, uint32_t pages_before)
 {
 	const uint32_t written = current_object->race_background.next_page_words - 4u;
 	struct tilemap_pages *const pages = TILEMAP_PAGES(current_object->race_background.page_word_address);
-	uint32_t entry;
+	struct waiting_page_word *const waiting = &wide_page_words[screen->index & 1u];
+	const int16_t signed_turn = (int16_t)((uint32_t)player_car->view_yaw << 4) >> 4;
+	const int turn = signed_turn < 0 ? -signed_turn : signed_turn;
+	const int side = console_wide_side();
 
-	if (console_wide_side() == 0 || page_word(pages) == pages_before || written < background_page_words_ADDRESS
-		|| written >= background_page_words_ADDRESS + 8u * 4u * 4u)
-		return;
-	entry = (written - background_page_words_ADDRESS) / 4u % 4u;
-	if (entry == 1u)
-		set_page_word(pages, BACKGROUND_PAGE_WORD_STEPS(written - 4u)[0]);
-	else if (entry == 2u)
-		set_page_word(pages, BACKGROUND_PAGE_WORD_STEPS(written + 4u)[0]);
+	if (starting || waiting->object != address_of(current_object))
+		waiting->object = 0u;    /* (a race's that is gone) */
+	if (side != 0 && changing && current_object->state == 2u && page_word(pages) != pages_before
+		&& written >= background_page_words_ADDRESS && written < background_page_words_ADDRESS + 8u * 4u * 4u)
+	{
+		const uint32_t step = (written - background_page_words_ADDRESS) / 4u % 4u;
+
+		if (step < 2u)
+			waiting->other_set = other_set;
+		else if (step == 2u || !waiting->other_set)
+		{
+			waiting->object = address_of(current_object);
+			waiting->word = page_word(pages);
+			waiting->turn = (step == 2u ? 0x160 : 0x60) - side;
+			set_page_word(pages, pages_before);
+		}
+	}
+	/* (at once where the change is over, or WIDE was turned off meanwhile) */
+	if (waiting->object != 0u && (turn <= waiting->turn || current_object->state != 2u || side == 0))
+	{
+		set_page_word(pages, waiting->word);
+		waiting->object = 0u;
+	}
 }
 
 /* A change's columns swapped in the order the view's turn takes them out of sight, on a route's (FULL and
@@ -840,8 +875,8 @@ static void wide_background_pages(uint32_t pages_before)
    the fork's branch, as its road turns the view the branch's way: the branch a route gives for its stage's
    background (fork_background_update) need not be the way the view turns, and the column in sight changed
    at once. The set the turn needs instead (a turn to the right takes the left column first, the branch 0
-   set), from its second step on: the first is the same in both */
-static void turn_background_pages(uint32_t pages_before)
+   set), from its second step on: the first is the same in both. Returns whether that is the other set */
+static bool turn_background_pages(uint32_t pages_before)
 {
 	const uint32_t written = current_object->race_background.next_page_words - 4u;
 	const int16_t turn = (int16_t)((uint32_t)player_car->view_yaw << 4) >> 4;
@@ -850,15 +885,19 @@ static void turn_background_pages(uint32_t pages_before)
 	if (!route_here() || page_word(TILEMAP_PAGES(current_object->race_background.page_word_address)) == pages_before
 		|| written < background_page_words_ADDRESS || written >= background_page_words_ADDRESS + 8u * 4u * 4u
 		|| (written - background_page_words_ADDRESS) / 4u % 4u != 1u)
-		return;
+		return false;
 	set = background_page_words_ADDRESS + (current_object->race_background.page_half * 2u + (turn < 0 ? 1u : 0u)) * 4u * 4u;
 	set_page_word(TILEMAP_PAGES(current_object->race_background.page_word_address),
 		BACKGROUND_PAGE_WORD_STEPS(set + 4u)[0]);
 	current_object->race_background.next_page_words = set + 8u;
+	return set != written - 4u;
 }
 
 /* The background at a fork: the stage's own (stage_backgrounds; the game takes the fork's stage and the
-   branch, which lead forward to its own choice), and none new for the pre-stage, which has none */
+   branch, which lead forward to its own choice), and none new for the pre-stage, which has none. There
+   REVERSE finishes with AUSTRALIA's goal (finish_stream), whose kangaroos take their colours from
+   AUSTRALIA's scene palette (at 4C00, the pre-stage's own at 4A00): put after the pre-stage's
+   (queue_stage_load), as the game puts it at AUSTRALIA (they were not there, a player's screenshot) */
 static void fork_background_update(void)
 {
 	const uint8_t built_stage = screen->built_stage;
@@ -873,6 +912,7 @@ static void fork_background_update(void)
 	}
 	if (screen->route_stage == 0u)
 	{
+		queue_palette(scene_palettes[FIRST_GOAL]);
 		player_car->new_branch = 0u;
 		original_race_background_update();
 		return;
@@ -885,20 +925,136 @@ static void fork_background_update(void)
 	player_car->branch = branch;
 }
 
-/* The background: the route's own at its forks, its columns swapped the way the view turns, whole on WIDE's
-   sides through a change */
+/* Whether 'stage''s course changes its background within the stage (a run's road event 4 or 5: the
+   background 2A + stage, road_surface_update) */
+static bool background_change_within(int stage)
+{
+	uint32_t course = stage_courses[stage], size;
+
+	for (;;)
+	{
+		if (s16_at(course) == -COURSE_JUMP)
+		{
+			course = u32_at(course + 2u);
+			continue;
+		}
+		if ((size = record_size(course)) == 0)
+			return false;
+		if (size == 6 && s16_at(course) > 0 && (byte_at(course + 5u) == 4u || byte_at(course + 5u) == 5u))
+			return true;
+		course += size;
+	}
+}
+
+/* 16 colours (at 'colours') into the screen's palette at once, 'blocks' times from 'place' on, as
+   upload_palette_list puts each entry */
+static void palette_blocks_now(uint32_t colours, uint32_t place, uint32_t blocks)
+{
+	const uint32_t index = screen->index;
+	uint32_t address = LINKED((index << 19) | (index >> 13) | 0x600000u, place);
+	const uint16_t *source = rom_pointer(colours);
+
+	for (; blocks != 0u; blocks--)
+		for (int colour = 0; colour < 16; colour += 2, address += 4u)
+			io_write32(address, source[colour] | (uint32_t)source[colour + 1] << 16);
+}
+
+/* A list of colour blocks (queue_palette_list's) at once */
+static void palette_list_now(uint32_t list)
+{
+	const uint32_t entries = list != 0u ? (PALETTE_BLOCK_LIST(list)->length
+		| (uint32_t)PALETTE_BLOCK_LIST(list)->length_high << 16) >> 3 : 0u;
+
+	for (uint32_t entry = 0; entry < entries; entry++)
+	{
+		const struct palette_block_entry *block = PALETTE_BLOCK_ENTRY(list + 4u + entry * 8u);
+
+		palette_blocks_now(block->colours, block->place, block->blocks);
+	}
+}
+
+/* A list of palette fades (start_palette_fades') at its end at once: each one's second palette */
+static void palette_fades_ended(uint32_t fade_list)
+{
+	const uint32_t fades = fade_list != 0u ? PALETTE_FADE_LIST(fade_list)->length / 0xCu : 0u;
+
+	for (uint32_t fade = 0; fade < fades; fade++)
+	{
+		const struct palette_fade_entry *entry = PALETTE_FADE_ENTRY(fade_list + 4u + fade * 0xCu);
+
+		palette_blocks_now(entry->to, entry->palette_offset, entry->blocks);
+	}
+}
+
+/* The palettes a route's background stands on (FULL's and REVERSE's: the sky black over a hill, the road's
+   colours another stage's, a player's report and screenshots). A change of the game's puts only the
+   colours that are not already the stage before's, the one its fork comes from: those of the way there
+   stay from the changes before it (the sky of stage 7, Spain, is the first change's, the pre-stage's to
+   stage 1). A route comes from another stage, or starts at a goal, so the palette is put as the game's
+   own way to 'stage' leaves it: from the race's start at the pre-stage, each change to the next stage of
+   the way (stage_backgrounds; its stage before is the background's built_stage, background >> 1) and
+   each change within a stage of it (2A + stage, where its course has one): their colours, and their fades
+   at their end (the backgrounds', the road's and those of the backgrounds leaving), until the change to
+   'stage' itself, which the game puts as ever ('stage' not the pre-stage, which has no change). Returns the road's palette fades the way leaves
+   (screen road_palette_fades: the last change with road colours') */
+static uint32_t forward_palettes(int stage)
+{
+	uint8_t way[2 * STAGES];
+	int steps = 0, at = stage_backgrounds[stage] >> 1;
+	const uint32_t *start_road = rom_pointer(stage_road_palettes[0]);
+	uint32_t road_fades = start_road[0];
+
+	for (;;)
+	{
+		if (background_change_within(at))
+			way[steps++] = (uint8_t)(0x2A + at);
+		if (at == 0)
+			break;
+		way[steps++] = stage_backgrounds[at];
+		at = stage_backgrounds[at] >> 1;
+	}
+	palette_list_now(no_background_palettes_ADDRESS);    /* (the pre-stage's start: race_background_update) */
+	palette_list_now(stage_road_palettes[0] + 4u);       /* (and road_surface_start) */
+	while (steps-- > 0)
+	{
+		const uint8_t background = way[steps];
+		const uint32_t road = background_road_palettes[background];
+
+		palette_list_now(background_palettes[background]);
+		palette_fades_ended(background_leaving_fades[background]);
+		if (road != 0u)
+		{
+			road_fades = ROAD_PALETTE_RECORD(road)->road_fades;
+			palette_fades_ended(road + 4u);
+		}
+		palette_fades_ended(background_palette_fades[background]);
+	}
+	return road_fades;
+}
+
+/* The background: the route's own at its forks on the palettes the game's way there leaves, its columns
+   swapped the way the view turns, and out of WIDE's sides' sight too */
 void race_background_update(void)
 {
+	const bool starting = current_object->state == 0u;
 	const bool changing = current_object->state == 2u;
+	const bool first_step = changing && current_object->race_background.change_step == 0u;
 	const uint32_t pages_before = changing
 		? page_word(TILEMAP_PAGES(current_object->race_background.page_word_address)) : 0u;
 
+	bool other_set = false;
+
 	fork_background_update();
+	/* (the palettes under the game's own, which it queues for the vertical blank: the race's first frame,
+	   and the first step of a fork's change, as it puts the new background's) */
+	if (route_here() && starting && screen->first_stage != 0u)
+		forward_palettes(screen->first_stage);    /* (REVERSE's goal; FULL starts at the pre-stage, as the game) */
+	else if (route_here() && first_step && current_object->race_background.change_step != 0u
+		&& screen->stage_background_change == 0u && screen->route_stage != 0u)
+		screen->road_palette_fades = forward_palettes(screen->route_stage);
 	if (changing && current_object->state == 2u)
-	{
-		turn_background_pages(pages_before);
-		wide_background_pages(pages_before);
-	}
+		other_set = turn_background_pages(pages_before);
+	wide_background_pages(starting, changing, other_set, pages_before);
 }
 
 /* The race's checkpoints: the time a fork adds the route's next stage's (the game's is by the stage its
@@ -922,7 +1078,7 @@ void race_progress_update(uint32_t *p_host_record, uint32_t *p_racer_copy)
 	{
 		/* (the start's time set by the car, player_car_update, with REVERSE_START_EXTRA in the setting: the
 		   setting back) */
-		game->master_time_difficulty[0] = routes.start_difficulty;
+		game->race_copies[0].master_time_difficulty[0] = routes.start_difficulty;
 		routes.time_given = true;
 	}
 	stage = RACE(race_copy)->stage;
@@ -939,9 +1095,9 @@ void race_progress_update(uint32_t *p_host_record, uint32_t *p_racer_copy)
 		const uint8_t checkpoint = RACE(race)->pass_checkpoint, branch = RACE(race)->pass_branch;
 		const int next = routes.running == ROUTE_FULL ? stage + 1 : routes.parents[stage][branch & 1u];
 		const int given = (int8_t)(stage_start_times[fork_next_stages[read_stage * 2 + branch]]
-			+ game->master_time_difficulty[checkpoint]) * 0x1E;
+			+ game->race_copies[0].master_time_difficulty[checkpoint]) * 0x1E;
 		const int due = routes.running == ROUTE_REVERSE ? reverse_checkpoint_time(checkpoint)
-			: (int8_t)(stage_start_times[next] + game->master_time_difficulty[checkpoint]) * 0x1E;
+			: (int8_t)(stage_start_times[next] + game->race_copies[0].master_time_difficulty[checkpoint]) * 0x1E;
 
 		RACE(race)->time_left = (uint16_t)(RACE(race)->time_left + due - given);
 	}

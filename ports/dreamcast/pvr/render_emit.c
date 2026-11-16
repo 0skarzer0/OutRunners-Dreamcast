@@ -29,8 +29,9 @@ static bool pal_primed[2];
 static void scan_palette(int screen)
 {
 	const uint16_t *p = s32_board.palette[screen];
-	if (!pal_shadow[screen] && !(pal_shadow[screen] = memalign(32, sizeof(pal_shadow0))))
-		return;
+	static bool refused;
+	if (!pal_shadow[screen] && (refused || !(pal_shadow[screen] = memalign(32, sizeof(pal_shadow0)))))
+		{ refused = true; return; }
 	uint16_t *shadow = pal_shadow[screen];
 	uint16_t *ver = &bank_ver[screen * BANKS];
 	for (int bank = 0; bank < BANKS; bank++)
@@ -99,6 +100,16 @@ typedef struct plane_tex
 	uint32_t *snap_ver;
 	uint16_t *snap_col;
 	uint8_t waited;       /* (frames the move to new colours has waited for room) */
+	uint32_t retry_at;    /* (memory refused: not asked again before this frame) */
+	/* the tile maps' four pages as the plane last looked at them, which pages, and the palette's changes
+	   then: a frame looks again only at the cells whose words changed and those come into sight, unless
+	   the pages, the palette or the configuration changed (then at every cell in sight) */
+	uint16_t *shadow;
+	int shadow_pages[4];
+	uint32_t shadow_epoch;
+	bool shadow_ok;
+	bool had_late;        /* (cells left for a later frame: the next looks at every cell again) */
+	uint64_t off_dirty[32];    /* cells out of sight whose words changed: margin_plane's to do */
 } plane_tex;
 /* 2 PLAYERS: the road planes (NBG0, NBG1: zoomed, their cells in sight never more than 21 columns by 15
    rows) as 512 x 256 windows, a quarter of a whole plane's texture, so both screens' planes fit in the
@@ -119,17 +130,38 @@ static int plane_set;
 static int scr;    /* the screen being drawn (0 the left) */
 #define PLANE(layer) (&plane_sets[plane_set][scr][layer])
 
-#define TILE_CACHE 2048
+/* (converted tiles kept in RAM: 1,024 x 576 bytes. 2,048 took 1.15 MiB of the heap; since most planes are
+   drawn from the tile store only the line-scrolled one converts, and with the heap short in 2 PLAYERS a
+   plane's records could not be allocated: plane_ready tried again every frame, each failed allocation
+   costing the console about 6 ms) */
+#define TILE_CACHE 1024
 typedef struct { uint16_t px[256]; uint64_t key; uint8_t pad[24]; } __attribute__((aligned(32))) tile_entry;
 static tile_entry *tile_cache;    /* (1 MiB, allocated on first use; without it every cell converts) */
 static uint16_t cellbuf[16 * 16] __attribute__((aligned(32)));
 
+#ifdef DL_CHECK
+#include <time.h>
+static uint64_t prof_acc[8];
+static uint32_t prof_frames;
+static uint64_t prof_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+#endif
 static int rt_screens_now = 1;    /* (the screens of the frame being drawn: 2 in 2 PLAYERS) */
 
+uint32_t rt_choose_us, rt_ready_us[DL_SPRITES];
+uint32_t rt_plane_fails[DL_SPRITES], rt_evictions;    /* (test overlay: plane textures not allocated; sprites evicted) */
+static bool evict_lru(void);
 static bool plane_ready(int layer)
 {
 	plane_tex *p = PLANE(layer);
-	const bool ring = rt_ring_planes && (layer == DL_NBG0 || layer == DL_NBG1);
+	bool ring = rt_ring_planes && (layer == DL_NBG0 || layer == DL_NBG1);
+	if (ring && !p->owner)
+	{
+		/* (the window's record of which cell each slot holds; without memory for it the plane stays whole,
+		   and is not asked again: a failed allocation is slow on the console) */
+		static bool owner_refused;
+		if (!owner_refused && !(p->owner = malloc(32 * 16 * sizeof(uint16_t)))) owner_refused = true;
+		if (!p->owner) ring = false;
+	}
 	if (p->tex >= 0 && p->w && p->ring != ring)
 	{
 		be->tex_free(p->tex);    /* (2 PLAYERS began or ended: the texture is made again its other size) */
@@ -138,8 +170,10 @@ static bool plane_ready(int layer)
 	}
 	if (p->tex >= 0 && p->w)
 		return true;
+	if (frame_no < p->retry_at)
+		return false;
+	p->retry_at = frame_no + 60;    /* (cleared below once the plane has its memory) */
 	p->ring = ring;
-	if (ring && !p->owner && !(p->owner = malloc(32 * 16 * sizeof(uint16_t)))) p->ring = false;
 	if (p->ring) memset(p->owner, 0, 32 * 16 * sizeof(uint16_t));
 	if (layer == DL_TEXT) { p->w = 512; p->h = 256; p->cell = 8; }
 	else if (layer == DL_BITMAP) { p->w = 512; p->h = 512; p->cell = 16; }
@@ -147,7 +181,7 @@ static bool plane_ready(int layer)
 	p->cols = p->w / p->cell;
 	p->rows = p->h / p->cell;
 	if (p->ring) p->w = 512, p->h = 256;    /* (the texture; cols and rows stay the plane's) */
-	if (!p->sig && !(p->sig = malloc(SIG_BYTES))) { p->w = 0; return false; }
+	if (!p->sig && !(p->sig = malloc(SIG_BYTES))) { p->w = 0; rt_plane_fails[layer] += 100; return false; }
 	if (layer != DL_TEXT && layer != DL_BITMAP && !p->snap_ver)
 	{
 		p->snap_ver = malloc(512 * sizeof(uint32_t));
@@ -156,8 +190,16 @@ static bool plane_ready(int layer)
 	}
 	if (p->snap_ver) memset(p->snap_ver, 0, 512 * sizeof(uint32_t));
 	p->tex = be->tex_alloc(p->w, p->h);
+	while (p->tex < 0 && evict_lru())    /* (sprites make room: a plane is never left out for them) */
+		p->tex = be->tex_alloc(p->w, p->h);
 	memset(p->sig, 0, SIG_BYTES);
-	if (p->tex < 0) { st->texture_memory_failures++; p->w = 0; return false; }
+	/* (a new texture holds nothing yet: every record of what it holds starts again, the text layer's and
+	   the tile maps' copies included, or unchanged rows and cells are left as whatever was in memory) */
+	p->config = 0xffffffffu;
+	p->shadow_ok = false;
+	if (p->tex < 0) { st->texture_memory_failures++; rt_plane_fails[layer]++; p->w = 0; return false; }
+	p->retry_at = 0;
+	if (be->tex_clear) be->tex_clear(p->tex);
 	return true;
 }
 
@@ -190,7 +232,7 @@ static void mark_visible(const dl_plane *pl)
 #define PLANE_CELLS_A_FRAME 280          /* (x 512 bytes: inside the backend's held-write buffer) */
 #define PLANE_NEW_CELLS 96               /* cells come into sight, done first (counted in the 280 too) */
 static uint64_t seen[PLANE_SETS][2][DL_SPRITES][32];
-bool rt_new_cells_first = true;   /* (test builds: X + B, a plane's move to new colours all at once) */
+bool rt_new_cells_first = true;   /* (test builds: X + B, a plane's move to new colours all at once, and the cells beside those in sight kept ready) */
 static int plane_new_left;
 #ifndef PLANE_US_A_FRAME
 #define PLANE_US_A_FRAME 3500
@@ -309,8 +351,14 @@ static void update_tile_plane_live(const dl_frame *f, int layer)
 /* One cell into the plane's texture, in the colours the plane holds for it (snap_col) */
 typedef struct { uint8_t cx, cy; uint16_t cell, colour, pb, slot; bool fresh, done, extra; } dirty_cell;
 
+#ifdef DL_CHECK
+static int layer_cells[DL_SPRITES], cur_layer;
+#endif
 static void convert_cell(plane_tex *p, int bank, const dirty_cell *d)
 {
+#ifdef DL_CHECK
+	layer_cells[cur_layer]++;
+#endif
 	const int cx = d->cx, cy = d->cy, colour = d->colour;
 	const uint16_t cell = d->cell;
 	const uint32_t ver = p->snap_ver[colour];
@@ -377,6 +425,9 @@ static bool colour_behind[512];
 static void update_tile_plane(const dl_frame *f, int layer)
 {
 	plane_tex *p = PLANE(layer);
+#ifdef DL_CHECK
+	cur_layer = layer;
+#endif
 	if (!p->snap_ver)
 	{
 		update_tile_plane_live(f, layer);
@@ -393,12 +444,56 @@ static void update_tile_plane(const dl_frame *f, int layer)
 		p->config = config;
 		memset(p->sig, 0, SIG_BYTES);
 		memset(p->snap_ver, 0, 512 * sizeof(uint32_t));
+		p->shadow_ok = false;
 	}
 	uint64_t *before = seen[plane_set][scr][layer];
+	/* the cells to look at: every one in sight, or those whose words changed and those come into sight */
+	static uint64_t todo[32];
+	static bool shadow_refused;    /* (a failed allocation is slow on the console: not asked again) */
+	if (!p->shadow && (shadow_refused || !(p->shadow = malloc(4 * 512 * sizeof(uint16_t)))))
+		{ shadow_refused = true; p->shadow_ok = false; }
+	const bool full = !p->shadow || !p->shadow_ok || p->shadow_epoch != pal_epoch || p->ring || p->had_late || p->waited ||
+		memcmp(p->shadow_pages, pages, sizeof(p->shadow_pages)) != 0 || p->rows > 32;
+	if (full)
+	{
+		memcpy(todo, visible, sizeof(todo));
+		memset(p->off_dirty, 0xff, sizeof(p->off_dirty));    /* (out of sight: all looked at again, beside the view) */
+	}
+	else
+	{
+		for (int cy = 0; cy < 32; cy++)
+			todo[cy] = visible[cy] & ~before[cy];
+		for (int q = 0; q < 4; q++)
+		{
+			const uint16_t *now = (const uint16_t *)(const void *)&s32_board.video_ram[((uint32_t)pages[q] << 9 & 0xffff) * 2];
+			uint16_t *was = p->shadow + q * 512;
+			for (int w = 0; w < 512; w += 16)
+			{
+				if (memcmp(now + w, was + w, 32) == 0)
+					continue;
+				for (int k = w; k < w + 16; k++)
+					if (now[k] != was[k])
+					{
+						const int cx = (q & 1) * 32 + (k & 31), cy = (q >> 1) * 16 + (k >> 5);
+						todo[cy] |= (1ull << cx) & visible[cy];
+						p->off_dirty[cy] |= (1ull << cx) & ~visible[cy];
+					}
+			}
+		}
+	}
+	if (p->shadow)
+	{
+		for (int q = 0; q < 4; q++)
+			memcpy(p->shadow + q * 512, &s32_board.video_ram[((uint32_t)pages[q] << 9 & 0xffff) * 2], 1024);
+		memcpy(p->shadow_pages, pages, sizeof(p->shadow_pages));
+		p->shadow_epoch = pal_epoch;
+		p->shadow_ok = true;
+	}
+	p->had_late = false;
 	int nd = 0, behind_cells = 0, behind_colours = 0;
 	for (int cy = 0; cy < p->rows && nd < 2048; cy++)
 	{
-		const uint64_t these = visible[cy];
+		const uint64_t these = todo[cy];
 		if (!these) continue;
 		for (int cx = 0; cx < p->cols && nd < 2048; cx++)
 		{
@@ -437,6 +532,35 @@ static void update_tile_plane(const dl_frame *f, int layer)
 		}
 	}
 	memcpy(before, visible, sizeof(visible));
+#ifdef DL_CHECK
+	if (getenv("RT_COLOURS"))
+	{
+		static uint32_t hist[2][DL_SPRITES][3][200], nfr;
+		uint8_t use[2][512] = {{0}};
+		for (int cy = 0; cy < p->rows; cy++)
+			for (int cx = 0; cx < p->cols; cx++)
+			{
+				const int page = pages[((cy >> 4) & 1) * 2 + ((cx >> 5) & 1)];
+				const uint16_t cell = dl_video_word((uint32_t)page << 9 | (uint32_t)(cy & 15) << 5 | (uint32_t)(cx & 31));
+				use[0][(cell >> 4) & 0x1ff] = 1;
+				if (visible[cy] >> cx & 1) use[1][(cell >> 4) & 0x1ff] = 1;
+			}
+		int n0 = 0, n1 = 0;
+		for (int c = 0; c < 512; c++) n0 += use[0][c], n1 += use[1][c];
+		hist[scr][layer][0][n0 > 199 ? 199 : n0]++;
+		hist[scr][layer][1][n1 > 199 ? 199 : n1]++;
+		if (++nfr % 3000 == 0)
+			for (int l = 0; l < DL_SPRITES; l++)
+				for (int k = 0; k < 2; k++)
+				{
+					uint32_t t = 0; for (int i = 0; i < 200; i++) t += hist[0][l][k][i];
+					if (!t) continue;
+					fprintf(stderr, "COLOURS layer %d %s:", l, k ? "sight" : "plane");
+					for (int i = 0; i < 200; i++) if (hist[0][l][k][i]) fprintf(stderr, " %d:%u", i, hist[0][l][k][i]);
+					fprintf(stderr, "\n");
+				}
+	}
+#endif
 	/* the move to new colours: all at once, when it fits (or has waited long enough) */
 	const int used = PLANE_CELLS_A_FRAME - plane_cells_left;
 	bool move = false;
@@ -472,11 +596,91 @@ static void update_tile_plane(const dl_frame *f, int layer)
 				continue;
 			const bool moving = move && d->extra;    /* (redone past the allowance: the picture moves at once) */
 			if (!spent && ++since >= 32) { since = 0; spent = plane_spent(); }    /* (the clock read now and then) */
-			if (!moving && (plane_cells_left <= 0 || spent)) { plane_cells_late++; continue; }
-			if (moving && PLANE_CELLS_A_FRAME - plane_cells_left >= PLANE_CELLS_MOST + PLANE_CELLS_A_FRAME) { plane_cells_late++; continue; }
+			if (!moving && (plane_cells_left <= 0 || spent)) { plane_cells_late++; p->had_late = true; continue; }
+			if (moving && PLANE_CELLS_A_FRAME - plane_cells_left >= PLANE_CELLS_MOST + PLANE_CELLS_A_FRAME) { plane_cells_late++; p->had_late = true; continue; }
 			convert_cell(p, bank, d);
 			d->done = true;
 		}
+}
+
+/* Cells just out of sight, kept up to date with what a frame has left. On a turn the road and the ground
+   swing sideways and bring in, at the screen's edge, cells last drawn when they were in sight before:
+   at a change of scenery (the ground of the next stage written into the plane while they were away) they
+   held the last stage's ground, and in a busy frame the allowance had gone before they were redone: the
+   blocks of the old colours at the edges in turns. So each frame, once every plane's cells in sight are
+   done, the cells beside them (a row above and below, then up to PLANE_MARGIN cells out to each side,
+   nearest first) are checked and redone while time is left, and come into sight already right. */
+#define PLANE_MARGIN 8
+
+static uint64_t rot_cols(uint64_t v, int n, int cols)
+{
+	const uint64_t mask = cols >= 64 ? ~0ull : ((1ull << cols) - 1);
+	n %= cols;
+	if (n < 0) n += cols;
+	v &= mask;
+	if (!n) return v;
+	return ((v << n) | (v >> (cols - n))) & mask;
+}
+
+static bool margin_cell(plane_tex *p, const dl_mix *m, const int *pages, int bank, int cx, int cy, int *since)
+{
+	const int page = pages[((cy >> 4) & 1) * 2 + ((cx >> 5) & 1)];
+	const uint16_t cell = dl_video_word((uint32_t)page << 9 | (uint32_t)(cy & 15) << 5 | (uint32_t)(cx & 31));
+	const int colour = (cell >> 4) & 0x1ff;
+	const int pb = pal_bank(m, colour << 4);
+	if (!p->snap_ver[colour])
+		take_colours(p, m, colour, pb);
+	const uint32_t sig = 0x80000000u | (p->snap_ver[colour] & 0x7fff) << 16 | cell;
+	if (p->sig[cy * p->cols + cx] == sig)
+		return true;
+	if (plane_cells_left <= 0 || ((++*since & 15) == 0 && plane_spent()))
+		return false;
+	const dirty_cell d = { (uint8_t)cx, (uint8_t)cy, cell, (uint16_t)colour, (uint16_t)pb, 0, false, false, false };
+	convert_cell(p, bank, &d);
+	st->cells_margin++;
+	return true;
+}
+
+static void margin_plane(const dl_frame *f, int layer)
+{
+	plane_tex *p = PLANE(layer);
+#ifdef DL_CHECK
+	cur_layer = layer;
+#endif
+	if (!rt_new_cells_first || !p->w || p->ring || !p->snap_ver || !p->sig || plane_spent())
+		return;
+	const uint64_t *vis = seen[plane_set][scr][layer];
+	const dl_mix *m = &f->layers[layer];
+	int pages[4], bank;
+	dl_plane_pages(layer, pages, &bank);
+	const uint32_t config = (uint32_t)m->palette_base << 8 | (uint32_t)m->shift << 4 | (uint32_t)bank;
+	if (p->config != config)
+		return;
+	const int rows = p->rows < 32 ? p->rows : 32, cols = p->cols < 64 ? p->cols : 64;
+	uint64_t done[32], next[32];
+	int since = 0;
+	/* the rows beside those in sight (the road climbing or dipping), then outwards along each row */
+	for (int cy = 0; cy < rows; cy++)
+		done[cy] = vis[cy];
+	for (int step = 0; step <= PLANE_MARGIN; step++)
+	{
+		for (int cy = 0; cy < rows; cy++)
+			next[cy] = step == 0 ? (vis[(cy + rows - 1) % rows] | vis[(cy + 1) % rows]) & ~vis[cy]
+				: (rot_cols(done[cy], 1, cols) | rot_cols(done[cy], -1, cols)) & ~done[cy];
+		for (int cy = 0; cy < rows; cy++)
+		{
+			uint64_t these = next[cy] & p->off_dirty[cy];    /* (only cells written while out of sight) */
+			while (these)
+			{
+				const int cx = __builtin_ctzll(these);
+				these &= these - 1;
+				if (!margin_cell(p, m, pages, bank, cx, cy, &since))
+					return;
+				p->off_dirty[cy] &= ~(1ull << cx);
+			}
+			done[cy] |= next[cy];
+		}
+	}
 }
 
 /* a character's 32 bytes of graphics (16 words of video RAM), folded word by word */
@@ -495,17 +699,49 @@ static uint32_t char_signature(uint32_t character)
 	return char_sig[character] = h;
 }
 
+/* The text layer as it was last looked at: its cells in sight and its character bank's graphics. A frame
+   looks again only at cells whose word changed or whose character's graphics changed, unless the palette,
+   the configuration or the character bank changed (then at all of them, as before) */
+static uint16_t text_shadow[2][DL_HEIGHT / 8][DL_WIDTH / 8];
+static uint8_t text_chars[2][512 * 32];
+static uint8_t text_char_dirty[512];
+static uint32_t text_epoch[2], text_bank[2] = { 0xffffffffu, 0xffffffffu };
+static bool text_ok[2];
+
 static void update_text_plane(const dl_frame *f)
 {
 	plane_tex *p = PLANE(DL_TEXT);
 	const dl_mix *m = &f->layers[DL_TEXT];
 	const uint32_t config = (uint32_t)m->palette_base << 4 | m->shift;
-	if (p->config != config) { p->config = config; memset(p->sig, 0, SIG_BYTES); }
+	if (p->config != config) { p->config = config; memset(p->sig, 0, SIG_BYTES); text_ok[scr] = false; }
+	uint32_t cbank;
+	const uint16_t *map = dl_text_map(&cbank);
+	const uint8_t *chars = &s32_board.video_ram[((cbank << 9) * 16 * 2) & (S32_VIDEO_RAM_SIZE - 1)];
+	const bool full = !text_ok[scr] || text_epoch[scr] != pal_epoch || text_bank[scr] != cbank;
+	if (!full)
+	{
+		memset(text_char_dirty, 0, sizeof(text_char_dirty));
+		for (int c = 0; c < 512; c++)
+			if (memcmp(chars + c * 32, text_chars[scr] + c * 32, 32) != 0)
+				text_char_dirty[c] = 1;
+	}
+	memcpy(text_chars[scr], chars, sizeof(text_chars[scr]));
+	text_epoch[scr] = pal_epoch;
+	text_bank[scr] = cbank;
+	bool any_char = false;
+	for (int c = 0; c < 512 && !full && !any_char; c++) any_char = text_char_dirty[c];
 	for (int cy = 0; cy < DL_HEIGHT / 8; cy++)
+	{
+		/* (a row whose words are as they were, with no character's graphics changed: nothing to do) */
+		if (!full && !any_char && memcmp(&map[cy * 64], text_shadow[scr][cy], sizeof(text_shadow[scr][cy])) == 0)
+			continue;
 		for (int cx = 0; cx < DL_WIDTH / 8; cx++)
 		{
 			uint32_t character;
 			const uint16_t cell = dl_text_cell(cx, cy, &character);
+			if (!full && cell == text_shadow[scr][cy][cx] && !text_char_dirty[character & 511])
+				continue;
+			text_shadow[scr][cy][cx] = cell;
 			const int pb = pal_bank(m, ((cell >> 9) & 0x7f) << 4);
 			uint32_t sig = mix32(mix32(mix32(2166136261u, cell), char_signature(character)),
 				(uint32_t)pb << 16 | bank_ver[pb]) | 1u;
@@ -521,6 +757,8 @@ static void update_text_plane(const dl_frame *f)
 			be->tex_write(p->tex, cx * 8, cy * 8, 8, 8, cellbuf, 8);
 			st->cells_converted++;
 		}
+	}
+	text_ok[scr] = true;
 }
 
 static void update_bitmap_plane(const dl_frame *f)
@@ -587,6 +825,312 @@ static void emit_plane(const dl_frame *f, int layer)
 			be->quad(p->tex, true, (float)x0, (float)y, (float)x1, (float)(y + n),
 				(float)(pl->sx[y] + x0), (float)pl->sy[y], (float)(pl->sx[y] + x1), (float)(pl->sy[y] + n), z, mod, add);
 			st->quads++;
+		}
+		y += n;
+	}
+}
+
+/* ---- tile planes straight from a tile store (REDESIGN.md, step 3) ----
+   The tile planes (NBG0-3) are not converted to 16-bit plane textures: each tile's pens are kept once, 4
+   bits a texel, in one paletted texture (the tile store; tiles come from the ROM and never change), and
+   every piece of a cell in sight is drawn as a quad from it, coloured by the PowerVR from a palette bank.
+   The colour banks the planes use take palette slots 0 .. DIRECT_SLOTS - 1 (the sprites' paletted
+   textures the rest), their colours staged for the frame (pal_stage): a palette fade costs 16 colours a
+   bank. A bank that finds no free slot (all used this frame) is drawn from a 16-bit copy of (tile,
+   colours) in a second store. */
+#define DIRECT_SLOTS 56               /* (the most: the arrays' size) */
+/* The planes' share of the 64 slots: 32 in one player, 48 in 2 PLAYERS (two screens' banks). The host count
+   over a FULL race: the planes drawn this way use 16 banks a frame (90%: 18, at most 31); with 56 the
+   sprites had 8 and 70 to 100 sprites a frame found no bank, each a 16-bit texture looked up and built in
+   full. A plane bank past the share is drawn from the 16-bit store. */
+static int direct_slots = 32;
+#define STORE_W 1024                 /* (the tile store: 64 x 64 tiles, 512 KiB) */
+#define STORE_TILES 4096
+#define STORE_HASH 8192
+#define ARGB_W 512                   /* (the 16-bit copies: 32 x 32, 512 KiB) */
+#define ARGB_TILES 1024
+#define ARGB_HASH 2048
+bool rt_direct_planes = true;        /* (test builds: the old plane textures when off) */
+static int store_tex = -1, argb_tex = -1;
+static uint32_t store_key[STORE_TILES], store_last[STORE_TILES], store_hand;
+static int16_t store_hash[STORE_HASH];
+static uint32_t argb_key[ARGB_TILES], argb_last[ARGB_TILES], argb_hand;
+static int16_t argb_hash[ARGB_HASH];
+static int16_t slot_of_bank[1024];   /* (palette bank, the screen's included: its slot, or -1) */
+static int16_t slot_bank[DIRECT_SLOTS];
+static uint32_t slot_frame[DIRECT_SLOTS];
+static uint16_t slot_col[DIRECT_SLOTS][16];
+static bool direct_ready;
+
+void rt_palettes_lost(void);
+/* (a change of share: every slot and sprite bank taken again) */
+static void set_direct_slots(int screens)
+{
+	const int want = screens > 1 ? 48 : 32;
+	if (want == direct_slots) return;
+	direct_slots = want;
+	rt_palettes_lost();
+	for (int i = 0; i < 1024; i++) slot_of_bank[i] = -1;
+	for (int i = 0; i < DIRECT_SLOTS; i++) slot_bank[i] = -1;
+}
+
+static bool direct_on(void)
+{
+	return rt_direct_planes && be->tex_alloc_pal4 && be->tex_write_pal4_rect && be->quad_pal &&
+		(be->pal_stage || be->pal_set);
+}
+
+static bool direct_init(void)
+{
+	if (direct_ready)
+		return store_tex >= 0;
+	direct_ready = true;
+	store_tex = be->tex_alloc_pal4(STORE_W, STORE_W);
+	while (store_tex < 0 && evict_lru()) store_tex = be->tex_alloc_pal4(STORE_W, STORE_W);
+	argb_tex = be->tex_alloc(ARGB_W, ARGB_W);
+	while (argb_tex < 0 && evict_lru()) argb_tex = be->tex_alloc(ARGB_W, ARGB_W);
+	for (int i = 0; i < STORE_HASH; i++) store_hash[i] = -1;
+	for (int i = 0; i < ARGB_HASH; i++) argb_hash[i] = -1;
+	for (int i = 0; i < 1024; i++) slot_of_bank[i] = -1;
+	for (int i = 0; i < DIRECT_SLOTS; i++) slot_bank[i] = -1;
+	memset(store_key, 0, sizeof(store_key));
+	memset(argb_key, 0, sizeof(argb_key));
+	return store_tex >= 0;
+}
+
+/* the hash tables keep the entry number; a slot taken over is found and cleared through its key */
+static int hash_find(int16_t *table, int size, const uint32_t *keys, uint32_t key)
+{
+	for (int i = (int)((key * 2654435761u) % (uint32_t)size), n = 0; n < size; n++, i = (i + 1) % size)
+	{
+		if (table[i] < 0) return -1;
+		if (keys[table[i]] == key) return table[i];
+	}
+	return -1;
+}
+
+static void hash_remove(int16_t *table, int size, const uint32_t *keys, uint32_t key)
+{
+	int i = (int)((key * 2654435761u) % (uint32_t)size);
+	for (int n = 0; n < size && table[i] >= 0 && keys[table[i]] != key; n++) i = (i + 1) % size;
+	if (table[i] < 0 || keys[table[i]] != key) return;
+	table[i] = -1;
+	/* (the entries after it in its run put back) */
+	for (int j = (i + 1) % size; table[j] >= 0; j = (j + 1) % size)
+	{
+		const int16_t e = table[j];
+		table[j] = -1;
+		int k = (int)((keys[e] * 2654435761u) % (uint32_t)size);
+		while (table[k] >= 0) k = (k + 1) % size;
+		table[k] = e;
+	}
+}
+
+static void hash_add(int16_t *table, int size, uint32_t key, int16_t entry)
+{
+	int i = (int)((key * 2654435761u) % (uint32_t)size);
+	while (table[i] >= 0) i = (i + 1) % size;
+	table[i] = entry;
+}
+
+/* an entry not used in the last four frames (the PowerVR may still be drawing from it), by a clock hand */
+static int take_entry(uint32_t *keys, uint32_t *last, int count, uint32_t *hand, int16_t *table, int size)
+{
+	for (int n = 0; n < count; n++)
+	{
+		const int e = (int)(*hand % (uint32_t)count);
+		(*hand)++;
+		if (!keys[e] || last[e] + 4 < frame_no)
+		{
+			if (keys[e]) hash_remove(table, size, keys, keys[e]);
+			keys[e] = 0;
+			return e;
+		}
+	}
+	return -1;
+}
+
+/* the tile's place in the tile store (put there now if it is not), or -1 */
+static int store_tile(uint32_t tile)
+{
+	const uint32_t key = tile + 1;
+	int e = hash_find(store_hash, STORE_HASH, store_key, key);
+	if (e < 0)
+	{
+		e = take_entry(store_key, store_last, STORE_TILES, &store_hand, store_hash, STORE_HASH);
+		if (e < 0) return -1;
+		static uint8_t pens[256];
+		const uint8_t *src = dl_tile_pens(tile);
+		if (src) memcpy(pens, src, 256); else memset(pens, 15, 256);
+		be->tex_write_pal4_rect(store_tex, (e % 64) * 16, (e / 64) * 16, 16, 16, pens, 16);
+		store_key[e] = key;
+		hash_add(store_hash, STORE_HASH, key, (int16_t)e);
+		st->direct_uploads++;
+	}
+	store_last[e] = frame_no;
+	return e;
+}
+
+/* the bank's palette slot for this frame (its colours staged when new or changed), or -1 */
+static int bank_slot(const dl_mix *m, int colour, int pb)
+{
+	int s = slot_of_bank[pb];
+	if (s < 0)
+	{
+		/* a slot no bank has used this frame: the least recently used */
+		for (int i = 0; i < direct_slots; i++)
+			if (slot_frame[i] != frame_no && (s < 0 || slot_frame[i] < slot_frame[s]))
+				s = i;
+		if (s < 0) return -1;
+		if (slot_bank[s] >= 0) slot_of_bank[slot_bank[s]] = -1;
+		slot_bank[s] = (int16_t)pb;
+		slot_of_bank[pb] = (int16_t)s;
+		slot_frame[s] = 0;
+		memset(slot_col[s], 0xff, sizeof(slot_col[s]));
+	}
+	if (slot_frame[s] != frame_no)
+	{
+		/* (once a frame: its colours as the palette has them now) */
+		uint16_t col[16];
+		col[0] = 0;
+		for (int pen = 1; pen < 16; pen++)
+			col[pen] = argb(dl_color(m, colour << 4 | pen));
+		if (memcmp(col, slot_col[s], sizeof(col)) != 0)
+		{
+			memcpy(slot_col[s], col, sizeof(col));
+			if (be->pal_stage) be->pal_stage(s, col); else be->pal_set(s, col);
+		}
+		slot_frame[s] = frame_no;
+		st->direct_banks++;
+	}
+	return s;
+}
+
+/* the 16-bit copy of the tile in the bank's colours (made now if there is none), or -1 */
+static int argb_tile(const dl_mix *m, uint32_t tile, int colour, int pb)
+{
+	if (argb_tex < 0) return -1;
+	uint32_t key = 2166136261u;
+	for (int pen = 1; pen < 16; pen++) key = (key ^ dl_color(m, colour << 4 | pen)) * 16777619u;
+	key = (key ^ tile) * 16777619u ^ (uint32_t)pb;
+	key |= 1;
+	int e = hash_find(argb_hash, ARGB_HASH, argb_key, key);
+	if (e < 0)
+	{
+		e = take_entry(argb_key, argb_last, ARGB_TILES, &argb_hand, argb_hash, ARGB_HASH);
+		if (e < 0) return -1;
+		const uint8_t *pens = dl_tile_pens(tile);
+		uint16_t lut[16];
+		lut[0] = 0;
+		for (int pen = 1; pen < 16; pen++) lut[pen] = argb(dl_color(m, colour << 4 | pen));
+		for (int i = 0; i < 256; i++) cellbuf[i] = lut[pens ? pens[i] & 15 : 15];
+		be->tex_write(argb_tex, (e % 32) * 16, (e / 32) * 16, 16, 16, cellbuf, 16);
+		argb_key[e] = key;
+		hash_add(argb_hash, ARGB_HASH, key, (int16_t)e);
+		st->direct_argb++;
+	}
+	argb_last[e] = frame_no;
+	return e;
+}
+
+/* Which tile planes are drawn straight from the store: those whose lines go together in rectangles (a few
+   strips: a cell piece a quad is cheap). A plane scrolled line by line (the ground and the sky: a strip a
+   line) stays with its plane texture, drawn a strip a line; once seen so, for two seconds, so that a plane
+   does not change ways often */
+#define DIRECT_MOST_STRIPS 40
+static uint32_t line_scrolled_until[2][DL_SPRITES];
+static bool layer_direct[2][DL_SPRITES];
+
+static int plane_strips(const dl_frame *f, int layer)
+{
+	const dl_plane *pl = &f->planes[layer];
+	int strips = 0;
+	for (int y = 0; y < DL_HEIGHT; y++)
+		if (pl->span_count[y] && (y == 0 || pl->sx[y] != pl->sx[y - 1] || pl->sy[y] != ((pl->sy[y - 1] + 1) & 511) ||
+			pl->span_count[y] != pl->span_count[y - 1]))
+			strips++;
+	return strips;
+}
+
+static bool choose_direct(const dl_frame *f, int layer)
+{
+	if (layer == DL_TEXT || layer == DL_BITMAP || !direct_on() || !direct_init())
+		return layer_direct[scr][layer] = false;
+	if (plane_strips(f, layer) > DIRECT_MOST_STRIPS)
+		line_scrolled_until[scr][layer] = frame_no + 120;
+	return layer_direct[scr][layer] = frame_no >= line_scrolled_until[scr][layer];
+}
+
+static void emit_plane_direct(const dl_frame *f, int layer)
+{
+	const dl_plane *pl = &f->planes[layer];
+	const dl_mix *m = &f->layers[layer];
+	const float z = (float)m->priority * 1024.0f;
+	uint32_t mod, add;
+	offset_colours(m->offsets, &mod, &add);
+	int pages[4], bank;
+	dl_plane_pages(layer, pages, &bank);
+	int y = 0;
+	while (y < DL_HEIGHT)
+	{
+		/* rows that continue each other make one strip, as emit_plane's */
+		int n = 1;
+		while (y + n < DL_HEIGHT && pl->sx[y + n] == pl->sx[y] && pl->sy[y + n] == ((pl->sy[y] + n) & 511) &&
+			pl->span_count[y + n] == pl->span_count[y] &&
+			memcmp(pl->spans[y + n], pl->spans[y], sizeof(pl->spans[y][0]) * pl->span_count[y]) == 0)
+			n++;
+		for (int i = 0; i < pl->span_count[y]; i++)
+		{
+			const int x0 = pl->spans[y][i][0], x1 = pl->spans[y][i][1];
+			for (int yy = 0; yy < n; )
+			{
+				const int py = (pl->sy[y] + yy) & 511, rows = 16 - (py & 15) < n - yy ? 16 - (py & 15) : n - yy;
+				uint32_t run_key = 0xffffffffu;
+				for (int xx = x0; xx < x1; )
+				{
+					const int px = (pl->sx[y] + xx) & 1023, cols = 16 - (px & 15) < x1 - xx ? 16 - (px & 15) : x1 - xx;
+					const int cx = px >> 4, cy = py >> 4;
+					const int page = pages[((cy >> 4) & 1) * 2 + ((cx >> 5) & 1)];
+					const uint16_t cell = dl_video_word((uint32_t)page << 9 | (uint32_t)(cy & 15) << 5 | (uint32_t)(cx & 31));
+					const int colour = (cell >> 4) & 0x1ff;
+					const int pb = pal_bank(m, colour << 4) & 1023;
+					const uint32_t tile = (uint32_t)bank << 13 | (cell & 0x1fff);
+#ifdef DL_CHECK
+					{
+						const uint32_t k = (uint32_t)cell << 10 | (uint32_t)pb;
+						if (k != run_key) st->direct_runs++;
+						run_key = k;
+					}
+#endif
+					/* the piece's texels in the cell, flipped as the cell is */
+					const int a = px & 15, b = a + cols, c = py & 15, d = c + rows;
+					float u0 = (float)a, u1 = (float)b, v0 = (float)c, v1 = (float)d;
+					if (cell & 0x4000) { u0 = (float)(16 - a); u1 = (float)(16 - b); }
+					if (cell & 0x8000) { v0 = (float)(16 - c); v1 = (float)(16 - d); }
+					const int s = bank_slot(m, colour, pb);
+					const int e = s >= 0 ? store_tile(tile) : -1;
+					if (e >= 0)
+					{
+						const float bx = (float)((e % 64) * 16), by = (float)((e / 64) * 16);
+						be->quad_pal(store_tex, s, (float)xx, (float)(y + yy), (float)(xx + cols), (float)(y + yy + rows),
+							bx + u0, by + v0, bx + u1, by + v1, z, mod, add);
+						st->direct_quads++;
+					}
+					else
+					{
+						const int g = argb_tile(m, tile, colour, pb);
+						if (g >= 0)
+						{
+							const float bx = (float)((g % 32) * 16), by = (float)((g / 32) * 16);
+							be->quad(argb_tex, false, (float)xx, (float)(y + yy), (float)(xx + cols), (float)(y + yy + rows),
+								bx + u0, by + v0, bx + u1, by + v1, z, mod, add);
+							st->direct_quads++;
+						}
+					}
+					xx += cols;
+				}
+				yy += rows;
+			}
 		}
 		y += n;
 	}
@@ -766,6 +1310,7 @@ static bool over_time(void)
    sprite). The entry being built was used this frame, so it is never taken. */
 static bool evict_lru(void)
 {
+	rt_evictions++;
 	int victim = -1;
 	for (int i = 0; i < SP_SLOTS; i++)
 		if (cache[i].key && cache[i].last + 4 < frame_no && (victim < 0 || cache[i].last < cache[victim].last))
@@ -862,7 +1407,7 @@ static int bank_for(const uint16_t col[16])
 	uint64_t h = 1469598103934665603ull;
 	for (int i = 0; i < 16; i += 2) h = fnv64(h, (uint32_t)col[i] | (uint32_t)col[i + 1] << 16);
 	int victim = -1;
-	for (int b = 0; b < RT_PAL_BANKS; b++)
+	for (int b = direct_on() ? direct_slots : 0; b < RT_PAL_BANKS; b++)
 	{
 		pal_bank_t *k = &pal_banks[b];
 		if (k->used && k->hash == h && memcmp(k->col, col, sizeof(k->col)) == 0) { k->last = frame_no; return b; }
@@ -876,6 +1421,13 @@ static int bank_for(const uint16_t col[16])
 	memcpy(k->col, col, sizeof(k->col));
 	be->pal_set(victim, col);
 	return victim;
+}
+
+/* the PowerVR's palette memory was cleared (a change of video mode): every bank loaded again */
+void rt_palettes_lost(void)
+{
+	for (int i = 0; i < DIRECT_SLOTS; i++) { slot_frame[i] = 0; memset(slot_col[i], 0xff, sizeof(slot_col[i])); }
+	memset(pal_banks, 0, sizeof(pal_banks));
 }
 
 /* a paletted texture's key: the graphic and which of its pens are shadow pens, not its colours */
@@ -1028,7 +1580,102 @@ static int sprite_texture(const dl_frame *f, const dl_sprite *s, int *tw, int *t
 	return -1;
 }
 
+/* The lookup memo. Looking a sprite up (its colours converted, its palette bank found, its key hashed and
+   the cache searched) cost the console about 2 ms a frame over the list, and each frame looks most sprites
+   up two or three times (the frame's list, the next frame's ahead of time, the drawing). A lookup that found
+   a finished texture is remembered by what it depended on: the sprite's graphic and colour fields, the
+   frame's sprite colour setup, and the palette (any change of any bank forgets every memo); it is used again
+   only while its cache entry and palette bank still hold what they held. Sprites whose colours come from
+   the extra palette, and paletted ones that found no free bank, are always looked up. */
+#define LM_SIZE 512    /* (28 KiB: the heap has about 120 KiB to spare in a race; 196 KiB here left 7 and slowed the planes) */
+typedef struct
+{
+	uint32_t place, size, flags, colour, check;    /* (check: a second hash, the colour table's included) */
+	uint32_t cfg, epoch;
+	uint64_t key, colhash, graphic;
+	int16_t tex, shadow, bank;
+	uint16_t slot, w, h;
+	uint8_t scr;
+	bool valid;
+} lm_entry;
+static lm_entry *lmemo;
+static bool lm_pal_full;
+static uint32_t lm_cfg[2], lm_cfg_frame[2];
+static const dl_frame *lm_cfg_f[2];
+
+static uint32_t lm_frame_cfg(const dl_frame *f)
+{
+	if (lm_cfg_f[scr] == f && lm_cfg_frame[scr] == frame_no) return lm_cfg[scr];
+	uint32_t h = 2166136261u;
+	h = mix32(h, (uint32_t)f->group_shift << 24 | (uint32_t)f->group_mask << 16 | f->sprite_bits);
+	h = mix32(h, (uint32_t)f->shadow_mask << 16 | f->shadow_pen);
+	h = mix32(h, (uint32_t)rt_pal_enabled | (uint32_t)direct_on() << 1);
+	for (int g = 0; g <= f->group_mask; g++)
+		h = mix32(h, (uint32_t)f->groups[g].palette_base << 16 | (uint32_t)f->groups[g].shift << 8 | f->groups[g].screen);
+	lm_cfg_f[scr] = f; lm_cfg_frame[scr] = frame_no; lm_cfg[scr] = h;
+	return h;
+}
+
+static int sprite_texture_lookup(const dl_frame *f, const dl_sprite *s, int *tw, int *th, int *shadow);
 static int sprite_texture_built(const dl_frame *f, const dl_sprite *s, int *tw, int *th, int *shadow)
+{
+#ifdef RT_NO_LMEMO
+	return sprite_texture_lookup(f, s, tw, th, shadow);
+#endif
+	static bool lm_refused;
+	if (!lmemo && (lm_refused || !(lmemo = calloc(LM_SIZE, sizeof(lm_entry)))))
+		{ lm_refused = true; return sprite_texture_lookup(f, s, tw, th, shadow); }
+	if (s->extra)
+		return sprite_texture_lookup(f, s, tw, th, shadow);
+	const uint32_t size = (uint32_t)s->words << 16 | s->rows;
+	const uint32_t flags = (uint32_t)s->bits8 | (uint32_t)s->indirect << 1 | (uint32_t)s->end_pen << 8 | (uint32_t)scr << 16;
+	const uint32_t colour = (uint32_t)s->color << 16 | s->transparent_bits;
+	const uint32_t cfg = lm_frame_cfg(f);
+	uint32_t h = mix32(mix32(mix32(mix32(2166136261u, s->place), size), flags), colour);
+	uint32_t check = 0x9e3779b9u ^ s->place;
+	if (s->indirect)
+	{
+		const uint32_t *t = (const uint32_t *)(const void *)s->table;
+		for (int i = 0; i < 8; i++) { h = mix32(h, t[i]); check = (check ^ t[i]) * 0x85ebca6bu; check ^= check >> 13; }
+	}
+	lm_entry *m = &lmemo[(h ^ h >> 15) & (LM_SIZE - 1)];
+	if (m->valid && m->epoch == pal_epoch && m->cfg == cfg && m->place == s->place && m->size == size && m->flags == flags &&
+		m->colour == colour && m->check == check)
+	{
+		sp_entry *e = &cache[m->slot];
+		if (e->key == m->key && !e->partial && e->tex == m->tex &&
+			(m->bank < 0 || (pal_banks[m->bank].used && pal_banks[m->bank].hash == m->colhash)))
+		{
+			e->last = frame_no;
+			if (m->bank >= 0) pal_banks[m->bank].last = frame_no;
+			sprite_bank = m->bank;
+			last_slot = m->slot;
+			*tw = e->w; *th = e->h;
+			*shadow = e->shadow_tex;
+			st->sprite_cache_hits++;
+			fallback[m->graphic % FALLBACKS].graphic = m->graphic; fallback[m->graphic % FALLBACKS].key = m->key;
+			fallback[m->graphic % FALLBACKS].slot = m->slot;
+			return e->tex;
+		}
+	}
+	lm_pal_full = false;
+	const int tex = sprite_texture_lookup(f, s, tw, th, shadow);
+	if (tex >= 0 && !lm_pal_full)
+	{
+		m->place = s->place; m->size = size; m->flags = flags; m->colour = colour;
+		m->check = check;
+		m->cfg = cfg; m->epoch = pal_epoch;
+		m->slot = (uint16_t)last_slot; m->key = cache[last_slot].key; m->tex = (int16_t)tex;
+		m->bank = (int16_t)sprite_bank; m->colhash = sprite_bank >= 0 ? pal_banks[sprite_bank].hash : 0;
+		m->graphic = graphic_key(s);
+		m->valid = true;
+	}
+	else
+		m->valid = false;
+	return tex;
+}
+
+static int sprite_texture_lookup(const dl_frame *f, const dl_sprite *s, int *tw, int *th, int *shadow)
 {
 	/* 4-bit sprites whose pen 0 is clear get a paletted texture, when a bank is free for their colours
 	   (else, and for 8-bit sprites, a texture in their colours) */
@@ -1043,7 +1690,7 @@ static int sprite_texture_built(const dl_frame *f, const dl_sprite *s, int *tw, 
 			for (int p = 0; p < 16; p++) if (lut_sh[p]) shadow_pens |= 1u << p;
 			bank = bank_for(lut_out);
 			if (bank >= 0) key = pal_key(s, shadow_pens);
-			else st->pal_banks_full++;
+			else { st->pal_banks_full++; lm_pal_full = true; }
 		}
 	}
 	sprite_bank = bank;
@@ -1319,18 +1966,35 @@ static void build_pass(const dl_frame *f, const dl_sprite *list, int count)
 
 /* ---- the frame ---- */
 
+/* (test overlay: tile planes in use without their colour snapshot or tile-map copy, memory refused) */
+int rt_planes_degraded(void)
+{
+	int n = 0;
+	for (int sc = 0; sc < 2; sc++)
+		for (int l = DL_NBG0; l <= DL_NBG3; l++)
+		{
+			const plane_tex *p = &plane_sets[0][sc][l];
+			if (p->tex >= 0 && p->w) n += (!p->snap_ver) + (!p->shadow) * 10;
+		}
+	return n;
+}
+
 void rt_init(const rt_backend *backend)
 {
 	be = backend;
 	for (int b = 0; b < PLANE_SETS; b++)
 		for (int sc = 0; sc < 2; sc++)
-			for (int i = 0; i < DL_SPRITES; i++) { plane_sets[b][sc][i].tex = -1; plane_sets[b][sc][i].w = 0; }
+			for (int i = 0; i < DL_SPRITES; i++) { plane_sets[b][sc][i].tex = -1; plane_sets[b][sc][i].w = 0; plane_sets[b][sc][i].retry_at = 0; }
 	memset(seen, 0, sizeof(seen));
 	if (!tile_cache) { tile_cache = memalign(32, TILE_CACHE * sizeof(tile_entry)); if (tile_cache) memset(tile_cache, 0, TILE_CACHE * sizeof(tile_entry)); }
 	memset(cache, 0, sizeof(cache));
 	memset(fallback, 0, sizeof(fallback));
 	memset(pal_banks, 0, sizeof(pal_banks));
 	pal_primed[0] = pal_primed[1] = false;
+	/* (a new texture pool, after a change of screens: the tile stores are gone with it; without this their
+	   writes went on into whatever textures were given the same handles, the noise on 2 PLAYERS' sprites) */
+	direct_ready = false;
+	store_tex = argb_tex = -1;
 }
 
 static void view(int screen)
@@ -1342,6 +2006,7 @@ static void view(int screen)
 void rt_prepare_n(const dl_frame *const *fs, int count, bool (*keep_going)(void), uint32_t limit_us)
 {
 	rt_screens_now = count;
+	set_direct_slots(count);
 	st = &rt_prepare_stats;    /* (counted apart from rt_frame's) */
 	memset(st, 0, sizeof(*st));
 	frame_no++;
@@ -1389,6 +2054,7 @@ void rt_prepare(const dl_frame *f, bool (*keep_going)(void), uint32_t limit_us)
 void rt_frame_n(const dl_frame *const *fs, int count, rt_stats *stats)
 {
 	rt_screens_now = count;
+	set_direct_slots(count);
 	st = stats;
 	memset(st, 0, sizeof(*st));
 	const bool was_prepared = prepared;
@@ -1430,14 +2096,78 @@ void rt_frame_n(const dl_frame *const *fs, int count, rt_stats *stats)
 			   and empty) */
 			if (layer == DL_BITMAP && !PLANE(layer)->w && !bitmap_shows(f))
 				continue;
-			if (!plane_ready(layer))
-				continue;
+			const uint64_t q0 = be->clock_us ? be->clock_us() : 0;
+			const bool direct = choose_direct(f, layer);
+			const uint64_t qc = be->clock_us ? be->clock_us() : 0;
+			const bool ready = !direct && plane_ready(layer);
+			const uint64_t q1 = be->clock_us ? be->clock_us() : 0;
+			st->p1_us[3] += (uint32_t)(q1 - q0);
+			rt_choose_us += (uint32_t)(qc - q0);
+			rt_ready_us[layer] += (uint32_t)(q1 - qc);
+			if (!ready)
+				continue;    /* (drawn straight from the tile store, emit_plane_direct; or no texture) */
+#ifdef DL_CHECK
+			const uint64_t pt0 = prof_ns();
+#endif
 			if (layer == DL_TEXT) update_text_plane(f);
 			else if (layer == DL_BITMAP) update_bitmap_plane(f);
 			else update_tile_plane(f, layer);
+			st->p1_us[layer == DL_TEXT ? 0 : 1] += (uint32_t)((be->clock_us ? be->clock_us() : 0) - q1);
+#ifdef DL_CHECK
+			prof_acc[layer] += prof_ns() - pt0;
+#endif
 		}
 	}
+#ifdef DL_CHECK
+	const uint64_t pm0 = prof_ns();
+#endif
+	const uint64_t m0 = be->clock_us ? be->clock_us() : 0;
+	/* then, with the time left, the cells beside those in sight (margin_plane) */
+	for (int k = 0; k < count && !plane_spent(); k++)
+	{
+		const int sc = (k + (int)(frame_no & 1)) % count;
+		const dl_frame *f = fs[sc];
+		if (!f->display_on)
+			continue;
+		scr = sc;
+		cur = f;
+		for (int layer = DL_NBG0; layer <= DL_NBG3; layer++)
+			if (f->layers[layer].on && !layer_direct[sc][layer])
+				margin_plane(f, layer);
+	}
+#ifdef DL_CHECK
+	prof_acc[6] += prof_ns() - pm0;
+	if (getenv("RT_PROF") && ++prof_frames % 1000 == 0)
+	{
+		fprintf(stderr, "PROF us/frame: text %.1f nbg0 %.1f nbg1 %.1f nbg2 %.1f nbg3 %.1f bitmap %.1f margin %.1f\n",
+			prof_acc[0] / 1e6, prof_acc[1] / 1e6, prof_acc[2] / 1e6, prof_acc[3] / 1e6, prof_acc[4] / 1e6, prof_acc[5] / 1e6, prof_acc[6] / 1e6);
+		memset(prof_acc, 0, sizeof(prof_acc));
+	}
+#endif
+	st->p1_us[2] += (uint32_t)((be->clock_us ? be->clock_us() : 0) - m0);
 	PHASE(1);
+#ifdef DL_CHECK
+	if (getenv("RT_LAYER_CELLS"))
+	{
+		int t = 0;
+		for (int l = 0; l < DL_SPRITES; l++) t += layer_cells[l];
+		if (t >= atoi(getenv("RT_LAYER_CELLS")))
+		{
+			fprintf(stderr, "LC %u", frame_no);
+			for (int l = 1; l <= 4; l++)
+			{
+				/* (and whether the layer's lines are scrolled line by line: strips of one line) */
+				const dl_plane *pl = &fs[0]->planes[l];
+				int strips = 0;
+				for (int y = 0; y < DL_HEIGHT; y++)
+					if (pl->span_count[y] && (y == 0 || pl->sx[y] != pl->sx[y - 1] || pl->sy[y] != ((pl->sy[y - 1] + 1) & 511))) strips++;
+				fprintf(stderr, " L%d:%d/%d", l, layer_cells[l], fs[0]->layers[l].on ? strips : -1);
+			}
+			fprintf(stderr, "\n");
+		}
+		memset(layer_cells, 0, sizeof(layer_cells));
+	}
+#endif
 	for (int sc = 0; sc < count; sc++)
 	{
 		const dl_frame *f = fs[sc];
@@ -1462,8 +2192,14 @@ void rt_frame_n(const dl_frame *const *fs, int count, rt_stats *stats)
 			y += n;
 		}
 		for (int layer = DL_TEXT; layer <= DL_BITMAP; layer++)
-			if (f->layers[layer].on && PLANE(layer)->w)
+		{
+			if (!f->layers[layer].on)
+				continue;
+			if (layer_direct[sc][layer])
+				emit_plane_direct(f, layer);
+			else if (PLANE(layer)->w)
 				emit_plane(f, layer);
+		}
 	}
 	PHASE(2);
 #ifdef RT_BUILD_US
@@ -1495,6 +2231,7 @@ void rt_frame_n(const dl_frame *const *fs, int count, rt_stats *stats)
 			cur = fs[sc];
 			build_pass(fs[sc], fs[sc]->next_sprites, fs[sc]->next_sprite_count);
 		}
+	PHASE(3);    /* (the sprite passes, builds included; then the sprites drawn: phase 4) */
 	for (int sc = 0; sc < count; sc++)
 	{
 		const dl_frame *f = fs[sc];
@@ -1511,7 +2248,6 @@ void rt_frame_n(const dl_frame *const *fs, int count, rt_stats *stats)
 	}
 	prepared_memo = false;
 	view(0);
-	PHASE(3);
 	PHASE(4);
 	st->plane_cells_late = plane_cells_late;
 #undef PHASE

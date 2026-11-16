@@ -4,7 +4,7 @@
  *                 menu, DELUXE, NETWORK with its rooms, and OPTIONS with its pages
  *    Version:     0.1.4
  *    Created:     29-10-2026
- *    Modified:    07-11-2026
+ *    Modified:    15-11-2026
  *    Author:      Sebastian Toyos
  *
  *    license:BSD-3-Clause
@@ -74,16 +74,16 @@ enum
 static const char *const menu_items[] = { "ARCADE", "2 PLAYERS", "NETWORK", "& KNUCKLES", "OPTIONS", "EXIT" };
 static const char *const deluxe_items[] = { "CLASSIC", "TIME ATTACK", "FULL", "REVERSE", "BACK" };
 static const char *const options_items[] = { "CONTROLS", "DIFFICULTY", "TIME", "VIDEO", "VOLUME", "SOUND TEST", "STEERING", "FPS",
-	"BACK" };
+	"2P MUSIC", "BACK" };
 static const char *const network_items[] = { "HOST", "JOIN", "NAME", "PLAYERS", "BACK" };
 /* the letters NAME goes through: the font's (a space shown as _ while it is written) */
 static const char name_letters[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-";
 static const char *const time_stages[TIME_STAGES] = { "PRE-STAGE", "STAGE 1", "STAGE 2", "STAGE 3", "STAGE 4",
 	"FINAL STAGE" };
 static const char *const pixel_kinds[PIXELS_KINDS] = { "SHARP", "SMOOTH", "BILINEAR", "CRT" };
-static const char *const wide_kinds[WIDE_KINDS] = { "OFF", "16:9", "20:9", "16:10" };
-/* WIDE's values as VIDEO goes through them, narrowest first */
-static const int wide_order[WIDE_KINDS] = { WIDE_OFF, WIDE_16_10, WIDE_16_9, WIDE_20_9 };
+static const char *const wide_kinds[WIDE_KINDS] = { "OFF", "16:9", "20:9", "16:10", "AUTO" };
+/* WIDE's values as VIDEO goes through them: AUTO, then the narrowest first */
+static const int wide_order[WIDE_KINDS] = { WIDE_AUTO, WIDE_OFF, WIDE_16_10, WIDE_16_9, WIDE_20_9 };
 static const char *const control_names[CONTROLS] = { "STEER LEFT", "STEER RIGHT", "GAS", "BRAKE", "SHIFT UP",
 	"SHIFT DOWN", "MUSIC", "SONG <<", "SONG >>", "START" };
 /* the test mode's GAME DIFFICULTY, from EASY to HARD on its bar of 8 (the fourth, the game's own) */
@@ -95,7 +95,7 @@ static const char *const difficulties[DIFFICULTIES] = { "VERY EASY", "EASIER", "
 enum { MENU_ARCADE, MENU_TWO_PLAYERS, MENU_NETWORK, MENU_DELUXE, MENU_OPTIONS, MENU_EXIT };
 enum { DELUXE_CLASSIC, DELUXE_TIME_ATTACK, DELUXE_FULL, DELUXE_REVERSE, DELUXE_BACK };
 enum { OPTIONS_CONTROLS, OPTIONS_DIFFICULTY, OPTIONS_TIME, OPTIONS_VIDEO, OPTIONS_VOLUME, OPTIONS_SOUND_TEST,
-	OPTIONS_STEERING, OPTIONS_FPS, OPTIONS_BACK };
+	OPTIONS_STEERING, OPTIONS_FPS, OPTIONS_MUSIC, OPTIONS_BACK };
 enum { NETWORK_HOST, NETWORK_JOIN, NETWORK_NAME, NETWORK_PLAYERS, NETWORK_BACK };
 
 /* The lines a build shows of the title's menu and of OPTIONS: a computer's, all of them. A game device's
@@ -136,7 +136,11 @@ static const int options_lines[] = {
 #ifndef ORUNNERS_HANDHELD
 	OPTIONS_VIDEO,
 #endif
-	OPTIONS_VOLUME, OPTIONS_SOUND_TEST, OPTIONS_STEERING, OPTIONS_FPS, OPTIONS_BACK
+	OPTIONS_VOLUME, OPTIONS_SOUND_TEST, OPTIONS_STEERING, OPTIONS_FPS,
+#if !defined(ORUNNERS_HANDHELD) || defined(ORUNNERS_TWO_PLAYERS)
+	OPTIONS_MUSIC,    /* (where the build has 2 PLAYERS: the right seat's radio) */
+#endif
+	OPTIONS_BACK
 };
 
 /* NETWORK's lines: PLAYERS where a second player may play (2 PLAYERS offered) */
@@ -196,7 +200,7 @@ static struct
 console_window console_window_settings = { .window_scale = 2, .pixels = PIXELS_SHARP, .volume = 5, .name = "PLAYER",
 	.dead_zone = DEAD_ZONE_NORMAL, .sensitivity = STEERING_NORMAL, .wheel_rotation = WHEEL_ROTATION_GAME,
 	.steering_speed = STEERING_NORMAL, .centring = CENTRING_NORMAL, .vibration = VIBRATION_NORMAL, .vsync = true,
-	.phone_vibration = true };
+	.phone_vibration = true, .wide = WIDE_AUTO };
 
 const int console_wheel_rotations[WHEEL_ROTATIONS] = { WHEEL_ROTATION_GAME, 360, 450, 540, 720, 900, 1080 };
 
@@ -393,6 +397,11 @@ static void options_frame(uint32_t pressed)
 		console_window_settings.fps = !console_window_settings.fps;
 		console_window_settings.changed = true;
 	}
+	if (item == OPTIONS_MUSIC && (by || (pressed & ACTION_BIT(ACTION_ACCEPT))))
+	{
+		console_window_settings.both_radios = !console_window_settings.both_radios;
+		console_window_settings.changed = true;
+	}
 	if (pressed & ACTION_BIT(ACTION_ACCEPT))
 		switch (item)
 		{
@@ -440,6 +449,8 @@ static void options_frame(uint32_t pressed)
 		}
 		else if (options_lines[index] == OPTIONS_FPS)
 			shown = console_window_settings.fps ? "< ON >" : "< OFF >";
+		else if (options_lines[index] == OPTIONS_MUSIC)
+			shown = console_window_settings.both_radios ? "< ARCADE >" : "< PLAYER 1 >";
 		line(index, options_items[options_lines[index]], shown);
 	}
 	/* the game's version at the bottom right (of WIDE's wider screen too) */

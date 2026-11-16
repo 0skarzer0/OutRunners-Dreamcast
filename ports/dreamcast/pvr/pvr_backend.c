@@ -44,7 +44,9 @@ static struct
 /* each list's recorded headers and vertices, 32 bytes an entry: two sets, one being recorded while the
    submit thread sends the other */
 #define OP_BYTES (16 * 1024)
-#define PT_BYTES (192 * 1024)
+/* (2 PLAYERS with the tile planes drawn cell by cell, two screens' planes, strips and sprites: about 1,700
+   quads of 160 bytes; 192 KiB held 1,228 and the rest, the overlay and the last planes, were not drawn) */
+#define PT_BYTES (320 * 1024)
 #define TR_BYTES (32 * 1024)
 static uint8_t list_op[2][OP_BYTES] __attribute__((aligned(32)));
 static uint8_t list_pt[2][PT_BYTES] __attribute__((aligned(32)));
@@ -78,6 +80,15 @@ static int t_alloc_pal4(int w, int h)
 }
 
 static uint8_t *pool;    /* texture memory taken from KOS once, divided by vram_alloc */
+
+/* a new texture cleared to transparent through the store queues (1 MiB: about a millisecond); before, a plane
+   texture made in a race showed the memory's last contents in the cells not yet drawn (the route map's noise) */
+static void t_clear(int t)
+{
+	if (t < 0 || !tex[t].p) return;
+	const size_t bytes = tex[t].pal4 ? (size_t)tex[t].w * tex[t].h / 2 : (size_t)tex[t].w * tex[t].h * 2;
+	sq_set32(tex[t].p, 0, bytes & ~(size_t)31);
+}
 
 static int t_alloc_inner(int w, int h, bool pal4)
 {
@@ -145,6 +156,8 @@ typedef struct
 	size_t stage_used;
 	int stage_count;
 	stage_rec recs[STAGE_RECS];
+	uint64_t pal_dirty;           /* palette banks staged for this scene (render_emit's pal_stage) */
+	uint16_t pal[64][16];
 } job_t;
 static job_t jobs[2];
 static semaphore_t jobs_free, jobs_ready;
@@ -178,11 +191,16 @@ static void *submit_main(void *arg)
 		pvr_wait_ready();             /* (the previous scene has started rendering) */
 		const uint64_t t1 = timer_us_gettime64();
 		dc_submit_where = 'D';
-		if (j->stage_count)
+		if (j->stage_count || j->pal_dirty)
 			pvr_wait_render_done();
 		dc_submit_where = 'L';   /* (and, before held writes to its textures go in, finished) */
 		const uint64_t t2 = timer_us_gettime64();
 		flush_stage(j);
+		for (int b = 0; j->pal_dirty && b < 64; b++)
+			if (j->pal_dirty >> b & 1)
+				for (int i = 0; i < 16; i++)
+					pvr_set_pal_entry((uint32_t)(b * 16 + i), j->pal[b][i]);
+		j->pal_dirty = 0;
 		dc_submit_where = 'X';
 		pvr_scene_begin();
 		pvr_list_begin(PVR_LIST_OP_POLY);
@@ -341,6 +359,23 @@ static void t_write_pal4(int t, int y, int h, const uint8_t *idx, int stride)
 	pal4_write_rows((volatile uint16_t *)tex[t].p, tex[t].w, tex[t].h, y, h, idx, stride);
 }
 
+/* a rectangle of the tile store (render_emit's direct planes): its entries are taken over only once no
+   scene in flight draws from them, so the write goes straight in */
+static void t_write_pal4_rect(int t, int x, int y, int w, int h, const uint8_t *idx, int stride)
+{
+	pal4_write_rect((volatile uint16_t *)tex[t].p, tex[t].w, tex[t].h, x, y, w, h, idx, stride);
+}
+
+/* a palette bank's colours for the scene being made: put in by the submit thread once the scene before
+   it has been drawn */
+static void pal_stage(int bank, const uint16_t colours[16])
+{
+	job_t *j = &jobs[cur];
+	if (bank < 0 || bank >= 64) return;
+	memcpy(j->pal[bank], colours, 32);
+	j->pal_dirty |= 1ull << bank;
+}
+
 static void pal_set(int bank, const uint16_t colours[16])
 {
 	for (int i = 0; i < 16; i++)
@@ -448,7 +483,7 @@ static void q_alpha(int t, int bank, float x0, float y0, float x1, float y1, flo
 
 static uint64_t clock_us(void) { return timer_us_gettime64(); }
 static const rt_backend backend = { t_alloc, t_free, t_write, q_textured, q_shadow, q_solid, clock_us,
-	t_alloc_pal4, t_write_pal4, pal_set, q_pal, q_tint, q_alpha, q_view };
+	t_alloc_pal4, t_write_pal4, pal_set, q_pal, q_tint, q_alpha, q_view, t_write_pal4_rect, pal_stage, t_clear };
 
 /* The stats overlay (Start + Y toggles it, dc_overlay_on): two lines of figures over the top of the
    picture, from the BIOS font (12 x 24) drawn at half size. Each figure covers the last 64 frames:
@@ -470,7 +505,7 @@ static const char glyphs[] = "0123456789 MFDWPVUESCNBXG.YQR/ALHZTK";
 #define GLYPH_H 24
 static int font_tex = -1;
 static pvr_poly_hdr_t font_hdr;
-static char overlay_line[5][56];
+static char overlay_line[6][56];
 
 /* the font texture: the BIOS font's 12 x 24 glyphs reduced to 6 x 12, a texel lit where any of its 2 x 2
    pixels is (so the one-pixel strokes survive) */
@@ -666,6 +701,7 @@ static void change_screens(int screens)
 	flush_stage(&jobs[1]);
 	pvr_shutdown();
 	pvr_setup(screens);
+	rt_palettes_lost();    /* (the palette memory starts empty again) */
 	sem_signal(&jobs_free);
 	sem_signal(&jobs_free);
 }
@@ -677,6 +713,7 @@ void dc_pvr_frame(const dl_frame *frame)
 	dc_pvr_frame_n(&frame, 1);
 }
 
+static uint32_t p1_acc[5];    /* (test overlay: phase 1 split, summed over the window) */
 void dc_pvr_frame_n(const dl_frame *const *frames, int count)
 {
 	rt_stats stats;
@@ -730,29 +767,55 @@ void dc_pvr_frame_n(const dl_frame *const *frames, int count)
 	{
 		/* (overlay line 5, averages over 64 frames in ms: the game and sound since the last frame's
 		   hand-over / waiting for the list set / planes / sprites without builds / sprite builds) */
-		static uint32_t acc[5], n, late;
+		static uint32_t acc[7], n, late;
 		late += stats.plane_cells_late;
 		const uint32_t build = stats.build_us_total;
 		const uint32_t spr = stats.phase_us[3] + stats.phase_us[4];
 		acc[0] += last_handover ? (uint32_t)(t0 - last_handover) : 0;
 		acc[1] += (uint32_t)(t1 - t0);
-		acc[2] += stats.phase_us[0] + stats.phase_us[1] + stats.phase_us[2];
+		acc[2] += stats.phase_us[1];    /* (the plane textures' cells) */
+		acc[5] += stats.phase_us[0] + stats.phase_us[2];    /* (palette scan, backdrop and plane strips) */
 		acc[3] += spr > build ? spr - build : 0;
+		acc[6] += stats.phase_us[4];    /* (of the sprites: drawing them, after the passes that look them up) */
 		acc[4] += build;
+		for (int i = 0; i < 4; i++) p1_acc[i] += stats.p1_us[i];
+		p1_acc[4] += stats.cells_converted;
+		{
+			/* (line 6: the window's slowest frame, part by part: game and sound / rt_prepare / waiting for a list
+			   set / plane cells / palette scan and strips / sprite passes and drawing / sprite builds; then the
+			   frames skipped to keep time since the start) */
+			static uint32_t worst[8];
+			const uint32_t part[7] = { last_handover ? (uint32_t)(t0 - last_handover) : 0, (uint32_t)(tp - t0), (uint32_t)(t1 - tp),
+				stats.phase_us[1], stats.phase_us[0] + stats.phase_us[2], spr > build ? spr - build : 0, build };
+			uint32_t total = 0;
+			for (int i = 0; i < 7; i++) total += part[i];
+			if (total > worst[7]) { memcpy(worst, part, sizeof(part)); worst[7] = total; }
+			if (n == 63)
+			{
+				extern volatile uint32_t dc_frames_skipped;
+#define MS(v) (unsigned)((v) / 1000), (unsigned)((v) / 100 % 10)
+				snprintf(overlay_line[5], sizeof(overlay_line[5]), "V%u.%u %u.%u/%u.%u/%u.%u/%u.%u/%u.%u/%u.%u/%u.%u S%u O%u",
+					MS(worst[7]), MS(worst[0]), MS(worst[1]), MS(worst[2]), MS(worst[3]), MS(worst[4]), MS(worst[5]), MS(worst[6]),
+					(unsigned)dc_frames_skipped, (unsigned)overflows);
+#undef MS
+				memset(worst, 0, sizeof(worst));
+			}
+		}
 		if (++n == 64)
 		{
 			/* (then L tile cells carried over, Q the sound board's ms a frame, part of the first figure,
 			   and U the misaligned accesses done by hand in the window: each is a trap) */
-			extern volatile uint32_t dc_sound_us_total, dc_unaligned_count;
-			static uint32_t last_sound, last_unaligned;
-			const uint32_t snd = (dc_sound_us_total - last_sound) / 64;
-			for (int i = 0; i < 5; i++) acc[i] /= 64;
-			snprintf(overlay_line[4], sizeof(overlay_line[4]), "H%u.%u/%u.%u/%u.%u/%u.%u/%u.%u L%u Q%u.%u U%u",
+			extern volatile uint32_t dc_sound_us_total, dc_sound_end_us_total, dc_unaligned_count;
+			static uint32_t last_sound, last_end, last_unaligned;
+			const uint32_t snd = (dc_sound_us_total - last_sound) / 64, end = (dc_sound_end_us_total - last_end) / 64;
+			const uint32_t pass = snd > end ? snd - end : 0;
+			for (int i = 0; i < 7; i++) acc[i] /= 64;
+			snprintf(overlay_line[4], sizeof(overlay_line[4]), "H%u.%u/%u.%u/%u.%u+%u.%u/%u.%u/%u.%u L%u Q%u.%u+%u.%u E%u.%u U%u",
 				(unsigned)(acc[0] / 1000), (unsigned)(acc[0] / 100 % 10), (unsigned)(acc[1] / 1000), (unsigned)(acc[1] / 100 % 10),
-				(unsigned)(acc[2] / 1000), (unsigned)(acc[2] / 100 % 10), (unsigned)(acc[3] / 1000), (unsigned)(acc[3] / 100 % 10),
+				(unsigned)(acc[2] / 1000), (unsigned)(acc[2] / 100 % 10), (unsigned)(acc[5] / 1000), (unsigned)(acc[5] / 100 % 10), (unsigned)(acc[3] / 1000), (unsigned)(acc[3] / 100 % 10),
 				(unsigned)(acc[4] / 1000), (unsigned)(acc[4] / 100 % 10), (unsigned)late,
-				(unsigned)(snd / 1000), (unsigned)(snd / 100 % 10), (unsigned)(dc_unaligned_count - last_unaligned));
-			last_unaligned = dc_unaligned_count; last_sound = dc_sound_us_total;
+				(unsigned)(pass / 1000), (unsigned)(pass / 100 % 10), (unsigned)(end / 1000), (unsigned)(end / 100 % 10), (unsigned)(acc[6] / 1000), (unsigned)(acc[6] / 100 % 10), (unsigned)(dc_unaligned_count - last_unaligned));
+			last_unaligned = dc_unaligned_count; last_sound = dc_sound_us_total; last_end = dc_sound_end_us_total;
 			memset(acc, 0, sizeof(acc)); n = 0; late = 0;
 		}
 	}
@@ -782,9 +845,13 @@ void dc_pvr_frame_n(const dl_frame *const *frames, int count)
 		if ((scene_no & 63u) == 0u)
 		{
 			extern uint32_t dc_media_unpack_us_peek(void);
-			snprintf(overlay_line[0], sizeof(overlay_line[0]), "M%u F%u D%u W%u.%u P%u.%u V%u G%u", (unsigned)ov_missing,
+			extern uint32_t dc_media_tile_unpacks(void);
+			static uint32_t last_tile_unpacks;
+			const uint32_t tile_unpacks = dc_media_tile_unpacks() - last_tile_unpacks;
+			last_tile_unpacks += tile_unpacks;
+			snprintf(overlay_line[0], sizeof(overlay_line[0]), "M%u F%u D%u W%u.%u P%u.%u V%u G%u Z%u", (unsigned)ov_missing,
 				(unsigned)ov_fallback, (unsigned)dropped, (unsigned)(w_max / 1000), (unsigned)(w_max / 100 % 10),
-				(unsigned)(p_max / 1000), (unsigned)(p_max / 100 % 10), (unsigned)(va_free_bytes() / 1024), (unsigned)(ov_gmin / 1000));
+				(unsigned)(p_max / 1000), (unsigned)(p_max / 100 % 10), (unsigned)(va_free_bytes() / 1024), (unsigned)(ov_gmin / 1000), (unsigned)tile_unpacks);
 			const uint32_t u = dc_media_unpack_us_peek();
 			snprintf(overlay_line[1], sizeof(overlay_line[1]), "C%u N%u B%u X%u U%u.%u E%u S%u", (unsigned)ov_recolour,
 				(unsigned)ov_new, (unsigned)ov_pal, (unsigned)ov_full, (unsigned)(u / 1000), (unsigned)(u / 100 % 10), (unsigned)stats.texture_memory_failures,
@@ -795,10 +862,16 @@ void dc_pvr_frame_n(const dl_frame *const *frames, int count)
 				extern volatile int dc_safe_mode;
 				extern bool rt_pal_enabled;
 				extern bool rt_previews, rt_new_cells_first, dl_fog_blend, rt_low_2p;
-				snprintf(overlay_line[2], sizeof(overlay_line[2]), "Y%u/%u R%u.%u A%d L%d Z%d P%d N%d F%d H%d",
-					(unsigned)(vtx_used / 1024), (unsigned)(vtx_used_max / 1024),
-					(unsigned)(ps.rnd_last_time / 1000000), (unsigned)(ps.rnd_last_time / 100000 % 10),
-					dc_safe_mode, rt_pal_enabled ? 1 : 0, dc_depth_compact, rt_previews, rt_new_cells_first, dl_fog_blend, rt_low_2p);
+				(void)dc_safe_mode; (void)rt_pal_enabled; (void)rt_previews; (void)rt_new_cells_first; (void)dl_fog_blend; (void)rt_low_2p;
+				/* (phase 1 split over the window, ms a frame: text / tile planes / margin / choosing and readying; cells a frame) */
+				extern uint32_t rt_choose_us, rt_ready_us[];
+				snprintf(overlay_line[2], sizeof(overlay_line[2]), "K%u R%u.%u.%u.%u.%u.%u P%u.%u/%u.%u/%u.%u/%u.%u C%u",
+					(unsigned)(rt_choose_us / 64), (unsigned)(rt_ready_us[0] / 64), (unsigned)(rt_ready_us[1] / 64), (unsigned)(rt_ready_us[2] / 64),
+					(unsigned)(rt_ready_us[3] / 64), (unsigned)(rt_ready_us[4] / 64), (unsigned)(rt_ready_us[5] / 64),
+					(unsigned)(p1_acc[0] / 64000), (unsigned)(p1_acc[0] / 6400 % 10), (unsigned)(p1_acc[1] / 64000), (unsigned)(p1_acc[1] / 6400 % 10),
+					(unsigned)(p1_acc[2] / 64000), (unsigned)(p1_acc[2] / 6400 % 10), (unsigned)(p1_acc[3] / 64000), (unsigned)(p1_acc[3] / 6400 % 10),
+					(unsigned)(p1_acc[4] / 64));
+				memset(p1_acc, 0, sizeof(p1_acc)); rt_choose_us = 0; memset(rt_ready_us, 0, 6 * sizeof(uint32_t)); (void)ps; (void)vtx_used_max;
 			}
 			/* (T: sprite builds that waited for an unpack; K: builds that ran out of the frame's time) */
 			{
@@ -806,13 +879,14 @@ void dc_pvr_frame_n(const dl_frame *const *frames, int count)
 				   its bank still loading) in the window; L bank loads finished and E load errors in all;
 				   then each bank window's page, 9 while it is loading) */
 				extern volatile uint32_t dc_aica_stats[8];
-				extern int dc_aica_window_state(int window);
+				extern int dc_aica_window_state(int window); extern int rt_planes_degraded(void); extern uint32_t rt_plane_fails[DL_SPRITES], rt_evictions;
 				extern volatile uint32_t dc_frames_skipped;
 				static uint32_t last_on, last_un, last_skipped;    /* (S at the end: frames not drawn, to keep time) */
 				const uint32_t on = dc_aica_stats[0], un = dc_aica_stats[1];
-				snprintf(overlay_line[3], sizeof(overlay_line[3]), "T%u K%u A%u U%u L%u E%u W%d.%d S%u", (unsigned)ov_pending,
+				snprintf(overlay_line[3], sizeof(overlay_line[3]), "T%u K%u A%u U%u L%u E%u W%d.%d S%u G%u.%u.%u.%u.%u.%u V%u H%u", (unsigned)ov_pending,
 					(unsigned)ov_deferred, (unsigned)(on - last_on), (unsigned)(un - last_un), (unsigned)dc_aica_stats[2],
-					(unsigned)dc_aica_stats[4], dc_aica_window_state(0), dc_aica_window_state(1), (unsigned)(dc_frames_skipped - last_skipped));
+					(unsigned)dc_aica_stats[4], dc_aica_window_state(0), dc_aica_window_state(1), (unsigned)(dc_frames_skipped - last_skipped), (unsigned)rt_plane_fails[0], (unsigned)rt_plane_fails[1], (unsigned)rt_plane_fails[2], (unsigned)rt_plane_fails[3], (unsigned)rt_plane_fails[4], (unsigned)rt_plane_fails[5], (unsigned)rt_evictions, (unsigned)(mallinfo().fordblks / 1024));
+				memset(rt_plane_fails, 0, sizeof(rt_plane_fails)); rt_evictions = 0;
 				last_on = on; last_un = un; last_skipped = dc_frames_skipped;
 			}
 			ov_pending = ov_deferred = 0;
@@ -837,6 +911,7 @@ void dc_pvr_frame_n(const dl_frame *const *frames, int count)
 			overlay_text(2.0f, 25.0f, overlay_line[2]);
 			overlay_text(2.0f, 37.0f, overlay_line[3]);
 			overlay_text(2.0f, 49.0f, overlay_line[4]);
+			overlay_text(2.0f, 61.0f, overlay_line[5]);
 		}
 	}
 	if (dc_depth_compact) compact_depths();

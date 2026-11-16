@@ -3,7 +3,7 @@
  *    Description: the backgrounds: their layers and animations, the palette cycles, the sunset, the backdrops
  *    Version:     0.1.0
  *    Created:     12-10-2026
- *    Modified:    06-11-2026
+ *    Modified:    13-11-2026
  *    Author:      Sebastian Toyos
  *
  *    OutRunners (arcade, Sega System Multi 32): the game's V70 program decompiled into C by
@@ -1049,7 +1049,7 @@ void backdrop_translucent_start(void)
 /* Keeps the sprite on the background's panorama at the panorama's own speed (as backdrop_far_update),
    animates it and draws it only on even frames (frame_count), so it looks faint. By state: 0 waits until
    it is off the screen; 1 drawn while on the screen; off it, it ends once leaving. */
-void backdrop_translucent_update(void)
+void CONSOLE_ORIGINAL(backdrop_translucent_update)(void)
 {
 	uint32_t zero = 0;
 	uint32_t scroll_x = 0;

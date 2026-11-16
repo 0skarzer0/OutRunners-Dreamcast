@@ -382,15 +382,229 @@ merged here; this repository adds console/, the ports and their documents.
   under the picture). The headless's --wide-16-10. Checked: the same frames of a FULL race (the start, the
   pre-stage's fork, stage 1) in 16:10 and 16:9 as the window crops them, the sides drawn whole; VIDEO from OFF
   one step right to 16:10; built for Windows, Linux and Android without warnings. Not checked on a Steam Deck.
+- The route map beside the race (Sebas, on the Fold 7 opened: the sea and the landmarks with no land under
+  them, since 1.2.0): the decompilation's merge made PAGE_SELECT a view of halfwords, and side_map.c (and
+  route_select.c, REVERSE's goal) wrote a route map's page select as one word, its upper pages left as they
+  were (route_select's by chance the right ones). console_page_select writes both halves, as route_map_update
+  does. Checked: the headless's --side-map frames of a race show the close-up map whole again, REVERSE's map
+  the same as before; by Sebas on the Fold 7 opened (an APK made with OutRunners APK): "perfecto".
+- CLASSIC with one player has no WAITING FOR CHALLENGERS (Sebas: a wait for no one, the right seat's screen
+  unseen): the entries close once the choices are made, as in ARCADE; a challenger joins while the left seat
+  chooses (the right seat's START), and only then does the game wait, for the challenger's choices.
+  tests/console/classic.txt: the race starts at once (its 45 seconds, CLASSIC's 5 more); with the right
+  seat's START in the car select, a race of two.
 
+## Done (09-11-2026)
+
+- The devices in packages of their own (Sebas: not inside the computers' packages): a release has six,
+  the three computers' with their two games alone, and outrunners-switch.zip, outrunners-android.zip and
+  outrunners-anbernic.zip, each the device's game without assets beside its tool for Windows, macOS and
+  Linux (OutRunners APK.exe, "OutRunners APK (macOS)", "OutRunners APK (Linux)": the three find the device's
+  folder and font.bmp beside them), the licenses and a README of its own (docs/package/README-*.txt). The
+  CI's build job leaves the tools in a kit (outrunners-OS-kit.tar.gz, which keeps their permissions) and the
+  job devices packs the zips (ports/pack_devices.py), the programs as Unix entries with their permissions.
+  Checked: the script on this computer's builds, the Windows tools started from the unpacked packages (the
+  APK and PORTS made, the device's folder found beside them); the CI's run before a release.
+
+## Done (11-11-2026)
+
+- Merge outrunners-decomp up to 0a03f7f (the core at arcade-decomp 5714a73, console-original 2c54367): the
+  scenarios that cover the code identical on PowerPC, each value at the width the C reads it (toward a port
+  to a big-endian system). src/ written again with console/replaced.txt, the same as the merge left it. The
+  race's master_time_difficulty is one array of six bytes (its three fields before): console.c and routes.c
+  take it so, from the first race copy as the car does. The first run's layout written again (the decomp
+  split turntable_scenery_items, ending_actors, goal_actor_scripts and game_assignments_value_texts off
+  their neighbours), and with it the assets' version: a computer's first-run folder is taken out again, a
+  device's pack made before is refused. FULL's and REVERSE's control scripts poke the race's time as a byte
+  of its halfword (poke ADDRESS VALUE HALFWORD), as the decomp's routes do. Checked: the 16 scenarios
+  identical, picture and sound; the first run's folder against extract_assets.py's, no difference; the
+  console's headless game before and after the merge on tests/console (menu, controls, classic, reverse,
+  two_players, time_attack, full: 204,204 frames), its state, picture and sound the same in every frame.
+- WIDE's background through a change, the game's own again (a player's video: the canyon stayed behind the
+  road to Niagara, then turned into the falls' forest in a frame). Keeping the background whole (31-10) took
+  the page that joins the two backgrounds out of the change, and that page is the change: the view comes
+  back over it, the old background at one end and the new one at the other. So WIDE showed the old
+  background where the game shows the joining page, in its middle 320 columns too, until the last set
+  replaced it all at once. Now the game's four page words as it writes them, the last two (the other
+  column's swap at a turn of 160, the joining page's at 60) waiting until the turn is back the side's
+  columns more, where WIDE's sides are past their column too (wide_background_pages, routes.c): no half
+  swapped pages at the sides, which is what keeping it whole was for. The first swap (at 2A0, the turn's
+  most about 2A8) cannot wait: the strip a side shows of that column changes to the joining page's as the
+  game swaps it. Where a route's change takes the other set (turn_background_pages) the last swap does not
+  wait: the joining page is then in the column it was not drawn for, and its swap shows in the 320 columns
+  whenever it comes, 4:3 too (FULL's stage 1: San Francisco's skyline gone in a frame; to do). Checked on the
+  console's headless game: ARCADE to Niagara by the canyon (tests/console/arcade_niagara.txt and its controls;
+  before, 9,932 pixels of the middle 320 columns were not 4:3's in a frame of that change), its two changes
+  every 6th frame, and FULL's first 14,000 frames, their seven stretches the same way: the middle 320 columns
+  the same as 4:3's in every one, at 16:10, 16:9 and 20:9 (FULL's at the last two), the sides whole to the
+  eye at 20:9; 4:3 itself the same as before in 12,000 frames, picture and state. Not looked at in the
+  window, nor on a device.
+- The spray of Niagara's falls see-through (the same video: the falls blinked; Sebas). The game draws that
+  sprite on the background every other frame of its 30 a second so that it looks faint
+  (backdrop_translucent_update: the spray, the falls far off in the forest, the pyramids of stages 13 and
+  20), two of the screen's frames on and two off; the reference does the same, and so does a longplay of the
+  arcade. The console draws it every frame, half its colour and half the colour under it, as the ghost's
+  car (S32_SPRITE_GHOST): backdrop_translucent_update in console/replaced.txt (src/ written again: its two
+  lines), the console's keeps the handler's count odd and marks the sprites it puts in the list (console.c).
+  The arcade build blinks as the cabinet does. Checked on the console's headless game, ARCADE to Niagara: 64
+  frames in a row over the falls, the sky's brightness went between 237.7 and 234.6 two frames each (242.1
+  and 237.7 on the spray's other picture) and now stays at 235.2 (239.4) through the 8 frames of each of the
+  spray's pictures; the picture the same as before until the spray is first in sight (frame 11743). The
+  arcade build: the 16 scenarios identical, picture and sound. Not looked at in the window; the pyramids
+  not run.
+- REVERSE's backgrounds where the game shows them (issue 25: the sky black over a hill, a player's
+  screenshots; only the top of each stage's background in sight). The route map where its goal is picked
+  (route_select.c) left the background's tilemap zoomed about A0, 70, so the race drew its background 112
+  lines lower, its upper pages' empty rows in the sky: the center back at 0 as the map is left, as the game's
+  route map leaves it.
+- FULL's and REVERSE's palettes as the game's own way to a stage leaves them (issue 25: the lanes eaten by
+  orange zigzags, the road red, black blocks in the sky through a change, a hill another colour). A change of
+  the game's puts only the colours that are not already the stage before's: the rest stay from the changes on
+  the way there (Spain's sky is the pre-stage's to stage 1's). A route comes to a stage from another, or
+  starts at a goal: at a fork's change's first step, and at REVERSE's start, the palette is put as the way
+  there leaves it (forward_palettes, routes.c: from the pre-stage's start, each change to the next stage of
+  the way by stage_backgrounds and each change within a stage of it, their colours and their fades' ends,
+  the backgrounds', the road's and the leaving ones'), with the road's fades that way's (road_palette_fades),
+  under the new background's own. Checked on the console's headless game: REVERSE from AUSTRALIA (17 frames
+  through the race) and FULL (46, one every 2,500) against the same with the old palettes, the frames that
+  differed better each; at stage 7 the palette's background half (1000-17FF) the same as ARCADE's on the way
+  0-1-3-7 over the same hill; menu, controls, classic, time_attack, two_players and arcade_niagara identical
+  to the build before, state and picture in every frame. Not looked at in the window, nor REVERSE from the
+  other goals.
+- REVERSE's finish's kangaroos (issue 25: grey figures in the parade, a player's screenshot). The finish is
+  AUSTRALIA's goal at the pre-stage, and its parade's kangaroos take their colours from AUSTRALIA's scene
+  palette (scene_palettes, at 4C00; the pre-stage's is at 4A00, apart): put after the pre-stage's as the
+  route comes to it (fork_background_update). Checked on the console's headless game: the parade's
+  kangaroos as at ARCADE's AUSTRALIA (0-1-3-7-D-15, the sprites' palette there the same); menu, classic,
+  time_attack, two_players and arcade_niagara identical to the build before.
+- No pause in a race of the network's (issue 34; Sebas: it breaks the race's run): it held this device's car
+  alone while the others raced on. console_can_pause is false while the link is on, so START and Escape go
+  on as the cabinet's (the radio's >>), as in the race; a network race is left as before, at its end.
+  Checked on two console headless games on one computer (--real-time, tests/console/network_*): both
+  racing, the pause never offered; CLASSIC's race offers it as before.
+- A network race whose machine 1 is gone before it took the entries goes on (issue 34): the others' requests
+  waited for good, as machine 1's left seat takes them. The machine that sends its records on takes them on
+  in player 0's record as race_entries_update does (take_lost_entries, network.c): once every player still
+  heard has seen the last entry, a request is accepted, the first one opens the entries
+  (entry_frames_by_machines), all of them in cut them to ENTRIES_CUT, the countdown closes them. Checked on
+  two console headless games (--real-time, tests/console/network_*): the host gone 3 frames after its START,
+  the other device was in car select for good, now it races alone; gone 20 frames after, as before (the
+  entries already taken, counted down); both on, the race as before.
+- NETWORK on Android: Wi-Fi's multicast lock while the network is open (console_network_open), without
+  which some phones drop the rooms' beacons (issue 34): android_multicast_lock (ports/sdl2/main.c, JNI
+  through SDL's activity), CHANGE_WIFI_MULTICAST_STATE in the manifest. The APK built here; not run on a
+  phone.
+- SET UP WHEEL with the pedals and a shifter on devices of their own (issue 28: a wheel, pedals and a shifter on
+  USB each; the pedals never taken, no force feedback). The wheel's game controller layout stays as it was,
+  made of what is on the wheel's device; the steps watch every device, and what they take on another one
+  goes to wheel_extras (ports/sdl2/wheel_extras.c, wheel_devices.txt beside gamecontrollerdb.txt), read by
+  the wheel's player beside its game controller as its triggers and buttons are. That wheel is player 1's
+  as it comes, whatever device came first (its forces with it), and those devices are no player's game
+  controller. A wheel with every control its own writes no line: as before. Checked with SDL's virtual
+  joysticks (a wheel, pedals, a shifter; and one device with everything): the steps take each control where
+  it is, the layouts as before but for what is elsewhere, the pedals' travel and the buttons read back from
+  the file. Not tried with a real wheel, pedals and shifter.
+- An update no longer stops at "the assets pack is of another version of the game" (issue 37: macOS, after
+  1.3.0). The computers' console game writes its assets as a pack (outrunners.assets) beside the folder of
+  what it keeps the first time, for the devices' tools, and the search took a pack before the assets'
+  folder: after an update, the old build's pack for good. That pack is now tried first, and one that is not
+  taken is removed and written again from the folder (or from the first run's again, where the folder is
+  the old build's too). Checked on Windows with the pack's tables' version changed: the pack made again and
+  the game on; with the folder's version.txt changed too and the ROM set beside, the assets taken out again;
+  a good pack loaded once. Not checked on a Mac.
+- SET UP WHEEL takes an axis for SHIFT UP, SHIFT DOWN or START (issue 28: a handbrake): of the axes no step
+  took (the wheel's, the pedals'), the one pulled and let go, as a pedal is taken; held past the middle of
+  its travel, it is the button held. On the wheel's device, SDL's button on an axis in its layout
+  ("leftshoulder:a3"); on another, wheel_devices.txt's "start GUID a3 half inverted", the buttons' lines as
+  before. Checked with SDL's virtual joysticks: pedals with a handbrake as START (the gas pressed meanwhile
+  never taken), a wheel's own handbrake as SHIFT DOWN, held at a third and past the middle; the two cases
+  before, the same files.
+- outrunners-decomp merged (13-11-2026): the state in the V70's order on any processor (the bookkeeping by
+  halfwords, two lists of halfwords at odd addresses read as they are, the output test's bits by byte), the
+  EEPROM and the bookkeeping saved low byte first (the same files as before on the PC); the core at
+  arcade-decomp 20996ed, console-original 8cf9d7e, src/ decompiled again with console/replaced.txt. The 16
+  scenarios identical, picture and sound; the console's headless game the same before and after on
+  tests/console (menu, controls, classic, time_attack, two_players, arcade_niagara, full, reverse: state,
+  picture and sound) but OPTIONS' version; the assets pack's version the same.
+
+## Done (15-11-2026)
+
+- The pause's QUIT GAME leaves the race's sound off (issue 39: the engine went on at the title, and the
+  race's song till the menu's): game mode 1 goes to the title without turning it off, which the arcade never
+  needed, as it comes there from the ranking, whose first step does it; check_game_start's QUIT GAME now does
+  what that step does, the wheel motor off and reset_screen_sound (RESTART, which goes through it, too).
+  Checked with the console headless's new --quit N: ARCADE to Niagara, QUIT GAME at frame 6000 with the gas
+  down, the sound the same up to it and then silent from frame 6100 (it went on before); tests/console the
+  same before and after (state, picture and sound).
+- OPTIONS > VIDEO > WIDE AUTO, the computers' default (issue 40, as the Simpsons port's): WIDE as the shape of
+  the screen the window is on asks (wide_for_screen, Android's: 20:9, 16:9, 16:10 or off), chosen again where
+  it changes, every frame (a Steam Deck's 16:10 in its hands, 16:9 docked to a TV; the window on another
+  monitor), the window sized again for it; what draws and sizes the picture reads console_wide_in_effect.
+  outrunners.ini keeps 4 for it; a file that says another keeps it. Checked on Windows (a 3072 x 1728
+  monitor): a first start in AUTO, "screen 3072x1728: WIDE AUTO -> 16:9" and the window 796 x 448; with
+  wide=0 the window 640 x 448; VIDEO shows AUTO, then OFF; tests/console the same but menu's VIDEO page, WIDE's
+  line AUTO. Not tried on a Steam Deck, a 16:10 screen or with two monitors.
+- The radio's hidden song, Jingle Bell (Sebas): the game plays it for << and >> pressed together, which a game
+  controller's pad (both on it) cannot; console_radio_buttons presses the other one with >> past Last Wave and
+  with << before Magical Sound Shower and leaves the car's song at 10, which the game's next << or >> steps
+  from (to Last Wave or Magical Sound Shower). Checked on the console headless (the window port's buttons
+  through it too): TIME ATTACK, >> twelve times and << ten times, the titles going round with Jingle Bell
+  between the two.
+- RecompLauncher (Sebas, its guide recomplauncher.com/sdk-files/recomplauncher-agent.md): recomplauncher.json
+  at the top of the computers' packages (build.yml), levels 1-3: the player's orunners.zip (game), the console
+  game started with --game {game} (start), --prepare --game {game} on its setup screen (prepare), and
+  outrunners.ini's video settings, volume and FPS on the game's page (config, settings), the saves' files and
+  folder; the README's badge (the port is in its catalog as outrunners-port). In the window ports, only with
+  the new arguments: --game SET, the first run's set first (else the window as before, with what was wrong);
+  --prepare --game SET, the assets out of it with no window and before SDL starts, "progress 0.1 ..." lines,
+  0, 2 without --game, 3 when they did not come out; outrunners.ini's lines read with spaces around '='
+  too ("wide = 4"), as a launcher may write them. Checked on Windows: the file valid against the guide's
+  schema; --prepare 0 in 0.6 s, 3 with another file, 2 alone; then the game starts with no window between;
+  --game with no assets takes them out and plays; with no arguments and no set, the first run's window as
+  before; "wide = 0" and "  window_scale =  3" read (960 x 672). Not tried in RecompLauncher itself, on
+  Linux or on macOS.
+- The Recomp Standards the port did not meet (RecompLauncher's guide), but the achievements (Sebas): the
+  computers' games write their log, FILE_NAME.log in the folder of what they keep, the two runs before as
+  .1.log and .2.log (stderr, left on a terminal where one shows it); portable.txt beside the game (beside the
+  .app) keeps what they write there on Linux and macOS too, as on Windows; RecompLauncher's Big Picture
+  (RECOMPLAUNCHER_MODE=bigpicture) starts the console game full screen, not written to outrunners.ini; a
+  DualShock's or a DualSense's buttons on CONTROLS are its own (SDL's type of it: cross, circle, square,
+  triangle, L1, R1, L2, R2, from Kenney's sheet the game has, each symbol in two tiles), and with no
+  controller RECOMPLAUNCHER_PAD=playstation; the release's packages carry its version in their names
+  (outrunners-v1.3.2-windows-x64.zip; the CI's "dev" else), the folders in them as before. Checked on
+  Windows: four starts, outrunners.log, .1.log and .2.log, the newest first ("OutRunners 1.3.1, the date");
+  Big Picture's window 3072 x 1728, the screen's; CONTROLS (keys posted to the window, PrintWindow) with RT,
+  LT, RB, LB and Y, and with R2, L2, R1, L1 and a triangle; the devices' packer's names with and without
+  --version. portable.txt and the log on Linux and macOS not tried (the CI builds them); a real DualSense
+  not tried. The ROM set picked with a dialog waits for SDL3 (its branch).
 ## To do
 
+- REVERSE's finish (AUSTRALIA's at the pre-stage): the pair of kangaroos under the riders at each side of
+  the road (scenery_pair 02E1A6) is drawn nearer the middle than at AUSTRALIA, behind the crowd (its
+  pixels at x 79-237 where the game's are at 50-75 and 245-270), its record, place and the road's width
+  code (5) the same as there; the riders (020DCF) where the game has them.
+- Issue 25's last report, a split second of something wrong from the results to the title: not seen
+  pressing START on the route map or the ranking after ARCADE's race (the fades smooth, frame by frame);
+  the player to say which screen.
+
+- The northern lights of stage 26 are drawn every other frame too (aurora_update, by the count that also
+  times their animations), and one of the route map's landmarks: see-through as the spray, if they blink as
+  much.
+
+- FULL's and REVERSE's background changes where the view turns the other way than the background's pages
+  were drawn for (the fork's branch road the player takes): the turn's set keeps the swaps out of sight
+  (31-10), but the page that joins the two backgrounds is drawn for the other column, so the view comes back
+  over a cut and the game's last swap changes the picture in sight (FULL's stage 1 at frame 7087 of
+  tests/console/full.txt: San Francisco's skyline gone in a frame, 4:3 and WIDE). Without the joining page
+  there (the column out of sight straight to the new one's) one edge would cross the view instead. The cut
+  at 7087 is also the change's first step: a route's change from a stage to one the game never comes to
+  from it (FULL's 1 to 2) takes the background of the game's way there (0 to 2), whose first pages are
+  another stage's, not the one left. No page in the ROM joins the two; keeping the old pages in sight
+  instead would show them in the new background's colours.
 - The network on a network shared with strangers: a room's code to join it (today a device on the same local
   network can fill a room with JOINs or speak for a member it overhears).
-- The network: checked on two windows and between devices (Android's broadcasts:
-  some phones drop them without a multicast lock, then a room's address typed in); the pause in a network
-  race without holding the game (today the pause holds this device's car, the others race on); the entries
-  of a race whose machine 1 is gone mid-entries (counted down only).
+- The network: checked between devices (Android's multicast lock on a phone that dropped the beacons; the
+  Switch, the Steam Deck) (issue 34).
 - (done after 1.0) The decompilation's new version merged (2b4e7a0: the game's state as one structure, C
   pointers into it and into the program ROM's records): the core's console-original at arcade-decomp
   82aadc8 with CONSOLE_ORIGINAL; console/ reads the state through game-> and the pointers screen,

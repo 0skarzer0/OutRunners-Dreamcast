@@ -44,6 +44,18 @@ static inline void pal4_write_rows(volatile uint16_t *words, int w, int h, int y
 	}
 }
 
+/* a w0 x h0 rectangle at (x0, y0) (all even) of a w x h texture from one index byte a texel */
+static inline void pal4_write_rect(volatile uint16_t *words, int w, int h, int x0, int y0, int w0, int h0, const uint8_t *idx, int stride)
+{
+	for (int y = 0; y < h0; y += 2)
+	{
+		const uint8_t *a = idx + (size_t)y * stride, *b = a + stride;
+		for (int x = 0; x < w0; x += 2)
+			words[pal4_word(w, h, x0 + x, y0 + y)] = (uint16_t)((a[x] & 15) | (b[x] & 15) << 4 | (a[x + 1] & 15) << 8 |
+				(b[x + 1] & 15) << 12);
+	}
+}
+
 /* (host check) the index at (u, v) */
 static inline int pal4_texel(const uint16_t *words, int w, int h, int u, int v)
 {

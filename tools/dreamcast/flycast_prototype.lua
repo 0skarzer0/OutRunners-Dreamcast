@@ -165,7 +165,7 @@ flycast_callbacks = {
     end
 
     -- (the console menus' checks: a picture every 300 vblanks too, s5 from vblank 1500)
-    if capture_done and vblank_count >= 1500 and vblank_count <= 12000 and vblank_count % 300 == 0 then
+    if capture_done and vblank_count >= 1500 and vblank_count <= 18000 and vblank_count % 300 == 0 then
       pcall(function()
         local sof1 = flycast.memory.read32(0xa05f8050) % 0x800000
         write_ppm("D:/OutRunners-Dreamcast/emulator/screenshots/prototype-native-s" .. math.floor(vblank_count / 300) .. ".ppm", 0xa5000000 + sof1)

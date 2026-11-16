@@ -11,7 +11,7 @@
  *    are reloaded from pcm.bin when the game switches banks (rare: game start, race music, ending).
  * Conversions (see PVR-RENDERER-DESIGN.md "Audio"): level 0.375 dB steps on both chips; pan 3 dB steps;
  * envelope rate = MultiPCM effective rate (0-63) / 2; decay level x 2; pitch x 44642.86/44100.
- * Level glides are stepped once a frame. LFOs are not mapped yet.
+ * Level glides are stepped once a frame. LFOs: lfo_reg.
  */
 #include "aica_pcm.h"
 #include "page_cache.h"
@@ -214,6 +214,19 @@ static uint32_t rate_reg(const multipcm_voice *voice, int value)
 	return (uint32_t)(r >> 1);
 }
 
+/* The MultiPCM's LFO (vibrato and tremolo, from the sample's header or the program) as the AICA's: both
+   chips' waves are triangles; the frequency (0.17-7.1 Hz) to the AICA's nearest (LFOF), the pitch depth
+   (3.4-79 cents) to the nearest PLFOS (7-55 cents), the amplitude depth (0.4-24 dB) as ALFOS (the same
+   steps). (About half the notes a race plays use them.) */
+static uint32_t lfo_reg(const multipcm_voice *voice)
+{
+	static const uint8_t lfof[8] = { 0, 14, 17, 18, 19, 20, 20, 21 };
+	static const uint8_t plfos[8] = { 0, 1, 1, 1, 2, 2, 3, 4 };
+	const uint32_t vib = voice->vibrato & 7, trem = voice->tremolo & 7;
+	if (!vib && !trem) return 0;
+	return (uint32_t)lfof[voice->lfo_frequency & 7] << 10 | 2u << 8 | (uint32_t)plfos[vib] << 5 | 2u << 3 | trem;
+}
+
 /* The board is two cabinets with one sound board: the program pans each cabinet's sounds hard to one
    output (left for one seat, right for the other), so with one console and one player a race's music
    came from one speaker. As the PC port does (sound_chips_join_sides), both sides go to both speakers:
@@ -304,7 +317,7 @@ static void key_on(int v, const multipcm_voice *voice)
 		rate_reg(voice, voice->attack_reg));
 	reg_write(ch, 0x14, 0xfu << 10 | (uint32_t)(voice->decay_level_reg * 2) << 5 | rate_reg(voice, voice->release_reg));
 	reg_write(ch, 0x18, pitch_reg(voice));
-	reg_write(ch, 0x1c, 0);                  /* (LFOs not mapped yet) */
+	reg_write(ch, 0x1c, lfo_reg(voice));
 	reg_write(ch, 0x20, 0);
 	reg_write(ch, 0x24, 0xfu << 8 | pan_reg(voice));
 	write_level(v, (int)voice->dest_total_level, voice);

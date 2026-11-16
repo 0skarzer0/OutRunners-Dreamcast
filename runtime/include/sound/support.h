@@ -85,15 +85,46 @@ void move_block(uint16_t source, uint16_t destination, uint16_t count, bool upwa
 /* A jump through a table to an entry the table does not have: the original would run whatever is there */
 void sound_invalid_jump(uint32_t address);    /* the default of a switch on a jump table's index */
 
-void z80_block(int cycles, int fetches);
-void z80_cycles(int cycles);
+/* The Z80's timing state (sound_cpu.c). 'gate' is the first Z80 cycle at which a block must look at the
+   board (a YM3438 timer runs out, or an interrupt may be taken): blocks before it only count their cycles,
+   inline, which is exactly what the full z80_block did for them (the board's time floor(cycles * 5 / 2)
+   reaches a deadline D at cycle ceil(D * 2 / 5)) */
+typedef struct
+{
+	uint64_t clock;         /* where the next block starts, Z80 cycles */
+	uint64_t gate;
+	uint64_t block_start;   /* the clock when the block started */
+	uint32_t refresh;       /* opcode fetches so far */
+	uint32_t block_refresh; /* ... when the block started */
+	bool interrupts;        /* IFF1 */
+	bool after_ei;          /* EI ended the block before */
+	bool line;              /* the board's interrupt line to the Z80 */
+	bool held;              /* in reset */
+	bool running;           /* past the reset code: the main loop runs */
+} s32_z80_state;
+extern s32_z80_state s32_z80;
+void z80_block_board(int cycles, int fetches);
+static inline void z80_block(int cycles, int fetches)
+{
+	if (__builtin_expect(s32_z80.clock >= s32_z80.gate, 0))
+	{
+		z80_block_board(cycles, fetches);
+		return;
+	}
+	s32_z80.after_ei = false;
+	s32_z80.block_start = s32_z80.clock;
+	s32_z80.clock += (uint64_t)cycles;
+	s32_z80.block_refresh = s32_z80.refresh;
+	s32_z80.refresh += (uint32_t)fetches;
+}
+static inline void z80_cycles(int cycles) { s32_z80.clock += (uint64_t)cycles; }
 
 /* The refresh register (seven bits, the eighth as LD R,A left it) after the block's first 'fetches' opcode
    fetches */
 uint8_t refresh_read(int fetches);
 
 /* IFF2: what LD A,R puts in P/V */
-bool interrupts_enabled(void);
+static inline bool interrupts_enabled(void) { return s32_z80.interrupts; }
 void interrupts_on(void);
 void interrupts_on_after_block(void);
 void interrupts_off(void);

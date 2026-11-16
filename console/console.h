@@ -1,9 +1,9 @@
 /**
  *    Name:        console.h
  *    Description: what the console build tells the port
- *    Version:     0.1.4
+ *    Version:     0.1.5
  *    Created:     29-10-2026
- *    Modified:    07-11-2026
+ *    Modified:    15-11-2026
  *    Author:      Sebastian Toyos
  */
 #ifndef ORUNNERS_CONSOLE_H
@@ -45,9 +45,9 @@ int console_test_autopilot(void);
 /* True once the menu's EXIT was picked: the port closes the game */
 bool console_quit_requested(void);
 
-/* The pause: true while a race of the left seat's runs, when the port may stop the game (its START or BACK;
-   the seats' START is then no cabinet's: the radio's >> has its own control); QUIT GAME ends the games
-   being played, back to the title */
+/* The pause: true while a race of the left seat's runs, but the network's (the others race on), when the port
+   may stop the game (its START or BACK; the seats' START is then no cabinet's: the radio's >> has its own
+   control); QUIT GAME ends the games being played, back to the title */
 bool console_can_pause(void);
 void console_quit_game(void);
 
@@ -60,6 +60,11 @@ void console_restart_game(void);
 /* True while player 'player''s seat (0 the left) races with the manual transmission (the car select's
    choice): the touch controls' gear buttons are shown then alone */
 bool console_manual_gears(int player);
+
+/* The radio's << and >> of player 'player''s seat, held this frame, before they go to the board: Jingle Bell,
+   the radio's hidden song, which the game plays for both pressed together (a game controller's pad cannot), is
+   reached with >> past Last Wave and with << before Magical Sound Shower (the other one pressed with it) */
+void console_radio_buttons(int player, bool *previous, bool *next);
 
 /* 2 PLAYERS in the title's menu where the build has none (a phone's): the port offers it each frame where it
    can show both players (a tablet's screen, the two facing each other) */
@@ -167,6 +172,8 @@ enum
 	WIDE_20_9,          /* 88 more at each side (S32_VIDEO_WIDE_SIDE_20_9): a phone's screen */
 	WIDE_16_10,         /* 32 more at each side (S32_VIDEO_WIDE_SIDE_16_10): a Steam Deck's (after the others:
 	                       outrunners.ini keeps the number) */
+	WIDE_AUTO,          /* the one the screen's shape asks for (console_set_screen_wide): a computer's default, a
+	                       Steam Deck's 16:10 in its hands and 16:9 on a TV (issue 40) */
 	WIDE_KINDS
 };
 
@@ -205,6 +212,7 @@ typedef struct
 	bool vertical;         /* 2 PLAYERS: one screen over the other (false: side by side) */
 	int volume;            /* 0-10: 5 is the game's own */
 	char name[CONSOLE_NAME_LENGTH + 1];    /* the player's, as the network's rooms show it */
+	bool both_radios;      /* OPTIONS > 2P MUSIC: the right seat's radio heard too, as the cabinets' (false: the left one's alone) */
 	bool fps;              /* OPTIONS > FPS: the frames a second at the picture's top right, and in a window's title */
 	int dead_zone;         /* STEERING: DEAD_ZONE_* */
 	int sensitivity;       /* STEERING: the sticks', STEERING_LEVELS */
@@ -221,6 +229,11 @@ extern console_window console_window_settings;
 /* WIDE draws the frames wider (s32_video_set_wide_side): the columns more at each side, or 0 (WIDE off, or
    2 PLAYERS, whose screens are both the board's) */
 int console_wide_side(void);
+
+/* WIDE AUTO: the port says which WIDE the screen's shape asks for (WIDE_OFF till it does), and the one in effect
+   is that one with AUTO, else the setting (what draws and sizes the picture reads this, not the setting) */
+void console_set_screen_wide(int kind);
+int console_wide_in_effect(void);
 
 /* The folder TIME ATTACK keeps its ghosts in (ghost_0.bin to ghost_9.bin, a goal each), with its separator */
 void console_ghost_folder(const char *folder);
@@ -241,6 +254,9 @@ extern void (*console_ghost_reload)(void);
 void console_network_frame(void);
 bool console_network_waiting(void);
 size_t console_network_wait_sprites(uint8_t *list, size_t room);
+
+/* True while the network is open: rooms looked for, a room's, its races (Android's Wi-Fi multicast lock) */
+bool console_network_open(void);
 
 /* For scripted checks: where the network stands, a line of text */
 void console_network_describe(char *text, size_t size);

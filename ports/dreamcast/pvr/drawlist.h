@@ -148,6 +148,7 @@ uint16_t dl_color(const dl_mix *entry, int pixel);
    of video RAM bytes */
 uint16_t dl_plane_cell(int layer, int cx, int cy, int *bank);
 const uint8_t *dl_tile_pens(uint32_t tile);
+const uint16_t *dl_text_map(uint32_t *char_bank);
 uint16_t dl_text_cell(int cx, int cy, uint32_t *character);
 uint32_t dl_video_hash(uint32_t byte_address, uint32_t bytes);
 void dl_plane_pages(int layer, int *pages, int *bank);

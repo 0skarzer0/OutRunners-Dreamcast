@@ -50,7 +50,7 @@ CFLAGS += -DS32_SOUND_SILENT
 # render_emit: a frame stops building sprite textures 4 ms into its work (the rest wait a frame)
 CFLAGS += -DRT_BUILD_US=4000
 # Test images only (not a release): the stats overlay, hidden until X + Y, and the test switches
-# CFLAGS += -DDC_TEST_OVERLAY -DDC_TEST_OVERLAY_HIDDEN
+# CFLAGS += -DDC_TEST_OVERLAY    (test images only; off for a release)
 
 # The console build (console/: the PC version's menus: 2 PLAYERS with a second controller, & KNUCKLES and
 # OPTIONS) without VIDEO and EXIT (a game device's menus) and the network game (console_nonet.c in its
@@ -58,7 +58,7 @@ CFLAGS += -DRT_BUILD_US=4000
 # drawlist.c's, not the software video's.
 # (Changing these needs a clean build: the game's own sources read ORUNNERS_CONSOLE.)
 CFLAGS += -DORUNNERS_CONSOLE -DORUNNERS_HANDHELD -DORUNNERS_TWO_PLAYERS -DORUNNERS_SYSTEM_EXIT -DORUNNERS_NO_NETWORK -DORUNNERS_GHOST_PACKED
-CFLAGS += -DS32_VIDEO_EXTRA_ELSEWHERE '-DORUNNERS_VERSION="0.3 DC"' -I$(ROOT)/console -I$(ROOT)/src
+CFLAGS += -DS32_VIDEO_EXTRA_ELSEWHERE '-DORUNNERS_VERSION="0.4 DC"' -I$(ROOT)/console -I$(ROOT)/src
 
 # Dependency generation flags
 DEPFLAGS = -MMD -MP

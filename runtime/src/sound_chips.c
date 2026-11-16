@@ -4,7 +4,7 @@
  *                 frame by frame
  *    Version:     0.1.0
  *    Created:     13-10-2026
- *    Modified:    29-10-2026
+ *    Modified:    13-11-2026
  *    Author:      Sebastian Toyos
  *
  *    license:BSD-3-Clause
@@ -20,6 +20,7 @@
 
 #include "s32/multipcm.h"
 #include "s32/ym3438.h"
+#include "s32/byte_order.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -61,9 +62,11 @@ static struct
 
 static bool sides_together;    /* sound_chips_join_sides */
 
+uint64_t sound_cpu_now(void);
+void sound_cpu_deadline_changed(void);
 static uint64_t now(void)
 {
-	return sound.override != NO_TIMER ? sound.override : s32_board.sound_cycles;
+	return sound.override != NO_TIMER ? sound.override : sound_cpu_now();
 }
 
 /* board cycles 'clocks' of the YM3438 (which runs on the Z80's clock) take, rounded up */
@@ -163,6 +166,7 @@ static uint64_t fm_next_timer(void)
 static void deadlines_changed(void)
 {
 	sound_chips_next_deadline = fm_next_timer();
+	sound_cpu_deadline_changed();
 }
 
 /* (for sound_cpu.c's idle skip) the board time until which the chips change nothing the Z80 can read by
@@ -360,10 +364,11 @@ uint64_t sound_chips_frame_hash(void)
 
 uint64_t sound_board_state_hash(void)
 {
+	const uint8_t *ram = s32_order_v70(s32_board.shared_ram);    /* (as the Z80 holds it: s32/byte_order.h) */
 	uint64_t hash = 0xcbf29ce484222325ull;
 
-	hash = hash_bytes(s32_board.shared_ram, STACK_START - 0xE000u, hash);
-	return hash_bytes(s32_board.shared_ram + (STACK_END - 0xE000u), 0x10000u - STACK_END, hash);
+	hash = hash_bytes(ram, STACK_START - 0xE000u, hash);
+	return hash_bytes(ram + (STACK_END - 0xE000u), 0x10000u - STACK_END, hash);
 }
 
 const int32_t *sound_chips_frame_samples(int chip, size_t *count)

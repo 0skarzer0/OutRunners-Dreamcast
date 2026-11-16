@@ -2,9 +2,9 @@
  *    Name:        console.c
  *    Description: the console build's own versions of the game functions console/replaced.txt lists, and
  *                 what it tells the port
- *    Version:     0.1.1
+ *    Version:     0.1.4
  *    Created:     29-10-2026
- *    Modified:    07-11-2026
+ *    Modified:    15-11-2026
  *    Author:      Sebastian Toyos
  *
  *    license:BSD-3-Clause
@@ -19,7 +19,9 @@
 #include "game.h"
 #include "s32/video.h"
 
-#define COIN_SETTINGS       0x1Au    /* the test mode's COIN/CREDIT SETTING: 26 */
+#include <string.h>
+
+#define COIN_SETTINGS      0x1Au    /* the test mode's COIN/CREDIT SETTING: 26 */
 #define START_BUTTON        0x40u    /* screen buttons_pressed: START */
 #define TIME_ATTACK_TIME_LEFT (99u * 30u)    /* race time_left, in 30ths of a second */
 #define CLASSIC_EXTRA       5u       /* CLASSIC's seconds more, at the start and at each checkpoint */
@@ -97,10 +99,7 @@ void console_settings_to_race(void)
 	const uint32_t race = RACE_1;
 
 	RACE(race)->master_game_difficulty = game->game_difficulty;
-	RACE(race)->master_time_difficulty_0 = game->time_difficulty[0];
-	RACE(race)->master_time_difficulty_1 = (uint8_t)game->time_difficulty[1];
-	RACE(race)->master_time_difficulty_2_5 = (uint8_t)game->time_difficulty[2] | ((uint32_t)(uint8_t)game->time_difficulty[3] << 8u)
-		| ((uint32_t)(uint8_t)game->time_difficulty[4] << 16u) | ((uint32_t)(uint8_t)game->time_difficulty[5] << 24u);
+	memcpy(RACE(race)->master_time_difficulty, game->time_difficulty, sizeof(RACE(race)->master_time_difficulty));
 }
 
 void console_master_settings(void)
@@ -146,16 +145,59 @@ void network_check_stand_alone(void)
 	clear_text_layer();
 }
 
+/* ---- the picture ---- */
+
+/* The sprites on the background that the game draws every other frame so that they look faint (the spray of
+   Niagara's falls, the pyramids of stages 13 and 20): two of the screen's frames on and two off, which shows
+   as a blink (a player's report). Here they are drawn every frame and see-through: the count kept odd for the
+   game's handler, which draws when its next is even, and the sprites it puts in the list marked as a ghost's
+   (S32_SPRITE_GHOST: half their colour, half the colour under them), what the frames on and off add up to */
+void backdrop_translucent_update(void)
+{
+	const uint32_t first = screen->sprite_list_last + 0x10u;
+
+	current_object->backdrop_translucent.frame_count |= 1u;
+	original_backdrop_translucent_update();
+	for (uint32_t sprite = first; sprite <= screen->sprite_list_last; sprite += 0x10u)
+		if ((SPRITE_WORDS(sprite)[0] >> 14) == 0u)    /* (a sprite, not the group's jump) */
+		{
+			SPRITE_WORDS(sprite)[7] |= S32_SPRITE_GHOST;
+			SPRITE_WORDS(sprite + 0x3000u)[7] |= S32_SPRITE_GHOST;
+		}
+}
+
 /* ---- the sound ---- */
+
+#define RADIO_SONGS 11    /* radio_songs' records: the cars' ten and Jingle Bell */
+
+/* True for the sound of one of the radio's songs (radio_songs: those the cars start with and << and >> go
+   through) */
+static bool radio_song(uint8_t sound)
+{
+	for (int song = 0; song < RADIO_SONGS; song++)
+		if ((uint8_t)(radio_songs[song] >> 24) == sound)
+			return true;
+	return false;
+}
 
 /* A screen's sound requests, in the vertical blank: the left seat's always; the right one's only while it
    plays a game (game mode 6), the rest of the time dropped, so that what its screen would play unseen (the
-   entry countdown's DJ, its attract mode) is not heard and takes none of the 24 voices the two seats share */
+   entry countdown's DJ, its attract mode) is not heard and takes none of the 24 voices the two seats share.
+   Nor are the right seat's radio's songs heard (issue 22: two cabinets have a radio and speakers each, one
+   screen's two songs go to the same speakers) unless OPTIONS > 2P MUSIC asks for both: a song's request
+   leaves its ring as the game takes it, one a vertical blank, and is not sent; its other sounds are */
 void send_sound_requests(void)
 {
 	if (screen->index != LEFT_SEAT && screen->game_mode != GAME_MODE_PLAY)
 	{
 		screen->sound_queue_read = screen->sound_queue_write;
+		return;
+	}
+	if (screen->index != LEFT_SEAT && !console_window_settings.both_radios
+		&& screen->sound_queue_read != screen->sound_queue_write
+		&& radio_song(screen->sound_queue[screen->sound_queue_read & 0x1Fu]))
+	{
+		screen->sound_queue_read = (uint8_t)((screen->sound_queue_read + 1u) & 0x1Fu);
 		return;
 	}
 	original_send_sound_requests();
@@ -234,10 +276,14 @@ uint32_t check_game_start(uint32_t mode, uint32_t seat_credits)
 
 	if (console.quit_seats & (1u << screen->index))
 	{
-		/* (the pause's QUIT GAME: a game being played ends, back to the title) */
+		/* (the pause's QUIT GAME: a game being played ends, back to the title, with the sound and the wheel
+		   motor off as the ranking's first step leaves them before the title: game mode 1 does not do it, and
+		   the engine kept its revs and the race's song its sequence, issue 39) */
 		console.quit_seats &= (uint8_t)~(1u << screen->index);
 		if (mode == GAME_MODE_PLAY)
 		{
+			game->wheel_motor[screen->index] = 0u;
+			reset_screen_sound();
 			AS32(screen->game_mode) = GAME_MODE_RESTART;
 			return GAME_MODE_RESTART;
 		}
@@ -340,7 +386,7 @@ uint32_t check_game_start(uint32_t mode, uint32_t seat_credits)
 void console_classic_time(uint8_t passes)
 {
 	const uint32_t race = screen->race;
-	const uint16_t start_time = (uint16_t)((game->race_copies[0].master_time_difficulty_0 + 0x28u) * 0x1Eu);
+	const uint16_t start_time = (uint16_t)((game->race_copies[0].master_time_difficulty[0] + 0x28u) * 0x1Eu);
 
 	if (!console.classic || screen->is_host == 0u)
 		return;
@@ -363,11 +409,13 @@ void console_classic_time(uint8_t passes)
 }
 
 /* The car select's WAITING FOR CHALLENGERS! (then JUST A MOMENT PLEASE) once the player's choices are made,
-   while the race takes entries: with one player (no 2 PLAYERS, no CLASSIC, no network) none, and the entries
-   closed at once (player 0's record's entry_frames), as no one else comes */
+   while the race takes entries: with one player (no 2 PLAYERS, no network, no challenger in CLASSIC) none,
+   and the entries closed at once (player 0's record's entry_frames), as no one else comes. CLASSIC's
+   challenger joins while the left seat chooses: the arcade's 10 seconds after it, the right seat's screen
+   unseen, were a wait for no one (Sebas) */
 void waiting_banner_show(void)
 {
-	if (console.two_players || console.classic || console_network_linked())
+	if (console.two_players || console_network_linked())
 	{
 		original_waiting_banner_show();
 		return;
@@ -420,11 +468,27 @@ void console_attach(void)
 	s32_video_use_extra_palette(true);    /* (REVERSE's start line) */
 }
 
+static int screen_wide;    /* WIDE AUTO's, as the port says the screen is (WIDE_OFF till it does) */
+
+void console_set_screen_wide(int kind)
+{
+	screen_wide = kind > WIDE_OFF && kind < WIDE_AUTO ? kind : WIDE_OFF;
+}
+
+int console_wide_in_effect(void)
+{
+	const int wide = console_window_settings.wide;
+
+	if (wide == WIDE_AUTO)
+		return screen_wide;
+	return wide > WIDE_OFF && wide < WIDE_AUTO ? wide : WIDE_OFF;
+}
+
 int console_wide_side(void)
 {
 	if (console.two_players)
 		return 0;    /* (2 PLAYERS: both screens alike) */
-	switch (console_window_settings.wide)
+	switch (console_wide_in_effect())
 	{
 		case WIDE_16_10: return S32_VIDEO_WIDE_SIDE_16_10;
 		case WIDE_16_9: return S32_VIDEO_WIDE_SIDE_16_9;
@@ -454,8 +518,37 @@ void console_actions(uint32_t pressed)
 
 bool console_can_pause(void)
 {
-	/* (not over REVERSE's map, in the race's step 5: its START picks the goal) */
-	return SCREEN(SCREEN_1)->game_mode == GAME_MODE_PLAY && racing(SCREEN_1) && !console_route_select_running();
+	/* (not over REVERSE's map, in the race's step 5: its START picks the goal; nor in a race of the network's,
+	   where the others race on: it held this device's car alone, issue 34) */
+	return SCREEN(SCREEN_1)->game_mode == GAME_MODE_PLAY && racing(SCREEN_1) && !console_route_select_running()
+		&& !console_network_linked();
+}
+
+/* ---- the radio's hidden song ---- */
+
+#define LAST_RADIO_SONG     9u    /* Last Wave: the game's >> goes on from it to the first, Magical Sound Shower */
+#define FIRST_RADIO_SONG    0u
+#define HIDDEN_RADIO_SONG   10u   /* Jingle Bell, radio_songs' eleventh */
+
+void console_radio_buttons(int player, bool *previous, bool *next)
+{
+	static bool held[CONTROL_PLAYERS][2];    /* the seat's << and >> the frame before */
+	const uint32_t seat = player == 0 ? SCREEN_1 : SCREEN_2;
+	const bool previous_pressed = *previous && !held[player][0], next_pressed = *next && !held[player][1];
+	uint8_t song;
+
+	held[player][0] = *previous;
+	held[player][1] = *next;
+	if (previous_pressed == next_pressed || SCREEN(seat)->game_mode != GAME_MODE_PLAY || !racing(seat))
+		return;
+	song = CAR(seat + SCREEN_CAR)->song;
+	if ((next_pressed && song == LAST_RADIO_SONG) || (previous_pressed && song == FIRST_RADIO_SONG))
+	{
+		/* (both pressed: the game plays Jingle Bell, and leaves the car's song as it was, which its next << or
+		   >> steps from: 10, between Last Wave and Magical Sound Shower) */
+		*previous = *next = true;
+		CAR(seat + SCREEN_CAR)->song = HIDDEN_RADIO_SONG;
+	}
 }
 
 bool console_manual_gears(int player)
@@ -475,7 +568,7 @@ void console_quit_game(void)
 
 bool console_can_restart(void)
 {
-	return console_can_pause() && restart.started != MENU_NOTHING && !console_network_linked();
+	return console_can_pause() && restart.started != MENU_NOTHING;
 }
 
 void console_restart_game(void)
@@ -538,6 +631,12 @@ void console_side_map_wanted(bool wanted)
 bool console_side_map_shown(void)
 {
 	return console_side_map_running();
+}
+
+void console_page_select(uint32_t address, uint32_t pages)
+{
+	PAGE_SELECT(address)[0] = (uint16_t)pages;
+	PAGE_SELECT(address)[1] = (uint16_t)(pages >> 16u);
 }
 
 bool console_right_seat_joins(void)

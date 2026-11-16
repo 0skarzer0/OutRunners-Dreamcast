@@ -135,24 +135,24 @@ static const uint8_t *zmedia_page(zmedia *z, uint32_t page, bool may_unpack)
 
 /* ---- tiles ---- */
 
-#define UNPACKED 64
+/* tiles unpacked to a pen a byte, by the tile's number (one place each: no search). It was 64 tiles found
+   by a search through all 64 for every cell drawn */
+#define UNPACKED 256
 static uint8_t s_unpacked[UNPACKED][256];
 static uint32_t s_unpacked_tile[UNPACKED];
-static int s_unpacked_next;
 static uint8_t s_empty_tile[256];
 
 const uint8_t *dc_media_tile(uint32_t tile)
 {
 	const uint32_t index = tile % 32768u;
-	for (int i = 0; i < UNPACKED; i++)
-		if (s_unpacked_tile[i] == index) return s_unpacked[i];
+	const uint32_t slot = index % UNPACKED;
+	if (s_unpacked_tile[slot] == index) return s_unpacked[slot];
 	const uint32_t at = index * 128u;    /* (two pens a byte: tiles4) */
 	const uint8_t *page = zmedia_page(&s_tiles, at / s_tiles.page_size, true);
 	if (!page) return s_empty_tile;
 	const uint8_t *in = page + at % s_tiles.page_size;
-	uint8_t *out = s_unpacked[s_unpacked_next];
-	s_unpacked_tile[s_unpacked_next] = index;
-	s_unpacked_next = (s_unpacked_next + 1) % UNPACKED;
+	uint8_t *out = s_unpacked[slot];
+	s_unpacked_tile[slot] = index;
 	for (int i = 0; i < 128; i++)
 	{
 		out[2 * i] = in[i] & 15u;
@@ -238,9 +238,12 @@ int dc_media_open(const char *folder)
 	memset(s_empty_tile, 0x0f, sizeof(s_empty_tile));
 	for (int i = 0; i < UNPACKED; i++) s_unpacked_tile[i] = 0xffffffffu;
 	s_failed = 0;
-	/* tiles: 4 KiB pages (32 tiles), 32 of them unpacked; sprites: 8 KiB pages, 128 of them (1 MiB) */
+	/* tiles: 4 KiB pages (32 tiles), 64 of them unpacked (256 KiB); sprites: 8 KiB pages, 128 of them (1 MiB).
+	   (Tiles had 32 pages: a change of scenery wanted up to 18 pages inflated in one frame, each one eating
+	   the plane updates' time, and the ground at the screen's edges kept the last stage's tiles for frames.
+	   64 pages inflate a sixth as many over a race; host check: drawlist.c sim_tile) */
 	snprintf(path, sizeof(path), "%s/tiles4.z", folder);
-	if (zmedia_open(&s_tiles, path, 32, 4) != 0) return -1;
+	if (zmedia_open(&s_tiles, path, 64, 4) != 0) return -1;
 	snprintf(path, sizeof(path), "%s/sprites.z", folder);
 	if (zmedia_open(&s_sprites, path, 128, 4) != 0) { zmedia_close(&s_tiles); return -1; }
 	snprintf(path, sizeof(path), "%s/pcm.bin", folder);
@@ -275,6 +278,11 @@ void dc_media_update_stats(void)
 	dc_media_misses[0] = s_tiles.unpacks;
 	dc_media_misses[1] = s_sprites.unpacks;
 	if (s_pcm_cache) dc_media_misses[2] = (uint32_t)dc_cache_misses(s_pcm_cache);
+}
+
+uint32_t dc_media_tile_unpacks(void)    /* (tile pages inflated so far: the overlay's Z, a window's worth) */
+{
+	return s_tiles.unpacks;
 }
 
 uint32_t dc_media_unpack_us_peek(void)    /* (the same, without starting a new window) */

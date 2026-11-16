@@ -14,28 +14,39 @@ Dreamcast port. Upstream's own README is kept at [docs/UPSTREAM_README.md](docs/
 
 ## Status
 
-**Version 0.3.** Download it from [Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases).
+**Version 0.4.** Download it from [Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases).
 Played on a Dreamcast with GDEMU during development.
 
-New in 0.3:
-- **2 PLAYERS:** both players in one race on one console.
-- **Time Attack ghosts,** saved to the VMU.
-- **Niagara Falls' mist** no longer flickers.
-- **Large distant scenery** no longer blinks while its texture is being built.
-- **Soft reset:** A + B + X + Y + Start.
+New in 0.4, mostly speed:
+- **A reworked renderer.** Most background tile planes are drawn cell by cell from a store of the tiles'
+  16-colour graphics in video memory, with the PowerVR colouring them from its palette memory, so a change of
+  a stage's colours costs nothing.
+- **Less work each frame.** The background planes only look at cells that changed or just came into view, and
+  the text layer skips unchanged rows.
+- **The sound board's program runs about a third faster.**
+- **Cheaper sprites.** Sprites find their textures and palette slots far more cheaply, and the palette memory
+  is shared better, so far fewer sprites need full-colour textures.
+- **Result:** in one player, a race now leaves roughly half of every frame spare. On a real Dreamcast, one
+  player runs much better than in 0.3.
+- **Fixes:**
+  - the garbage at the road's edges where a stage's colours change is about 95% gone;
+  - 2 PLAYERS: a slowdown when memory ran short, and items at the end of a busy frame not being drawn;
+  - no more noise on the route map as it appears.
+- **From the PC version** ([cheviman](https://github.com/cheviman/outrunners-port)):
+  - Jingle Bell on the radio;
+  - REVERSE's and FULL's backgrounds and road in the game's own colours, and REVERSE's finish;
+  - QUIT GAME stops the race's sound;
+  - the route map's land under the sea and landmarks;
+  - OPTIONS > 2P MUSIC;
+  - the decompiled game's latest code.
 
 Known issues:
-- **2 PLAYERS is demanding:** it can drop frames or run below full speed in busy stretches.
-- **Old colours at the screen edges:** where a stage's colours change, the ground and road at the edges of the
-  screen can briefly show blocks of the old colours. This happens on emulators and on a console.
-- **Dropped frames in one player:** the busiest stretches can drop a frame to keep the game and its music at
-  full speed.
+- **Dropped frames:** the busiest stretches can still drop a frame to keep the game and its music at full
+  speed. It happens more often in 2 PLAYERS, which also draws large scenery at half resolution.
 - **Ghost lines:** a VMU ghost can take a slightly rounder line than the original run through hard corners or
   crashes.
 - **Sound:** FM sound and sound LFOs aren't reproduced.
 - **No NETWORK mode.**
-- **Jingle Bell can't be reached:** the arcade's secret track needs both song buttons pressed at once, which the
-  Dreamcast pad can't do.
 
 ## Making the disc
 
@@ -45,7 +56,7 @@ You need:
   compiler and [mkdcdisc](https://gitlab.com/simulant/mkdcdisc) 0.0.4 or later.
 
 Using the release package
-([Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases), `OutRunners-DC-0.3.zip`):
+([Releases](https://github.com/MisterPezz82/OutRunners-Dreamcast/releases), `OutRunners-DC-0.4.zip`):
 - **Windows:** drag `orunners.zip` onto `make_disc.bat`, or run it and choose the zip.
 - **Linux/WSL:** `./make_disc.sh /path/to/orunners.zip`
 
@@ -70,7 +81,7 @@ Press Start on the title screen:
 | **ARCADE** | The arcade game, one player, free play |
 | **2 PLAYERS** | Both players in one race, side by side. Shown when a second controller is plugged in. |
 | **& KNUCKLES** | CLASSIC (the arcade game with a little more time; a second player can join with Start), TIME ATTACK (no time limit, racing your fastest run as a see-through ghost car), FULL (all the stages in one race), REVERSE (from a goal back to the start) |
-| **OPTIONS** | DIFFICULTY, TIME, VOLUME, SOUND TEST, STEERING (the stick's dead zone and sensitivity, the D-pad's steering speed, vibration, an input test), FPS |
+| **OPTIONS** | DIFFICULTY, TIME, VOLUME, SOUND TEST, STEERING (the stick's dead zone and sensitivity, the D-pad's steering speed, vibration, an input test), FPS, 2P MUSIC (in 2 PLAYERS, player 1's radio alone or both) |
 
 In a race, Start pauses the game: CONTINUE, RESTART or QUIT GAME. DIFFICULTY sets the traffic and rivals, and
 TIME sets the seconds each stage gives you. If the arcade game is too hard to finish, turn TIME down too.
@@ -80,8 +91,9 @@ TIME sets the seconds each stage gives you. If the arcade game is too hard to fi
 - **Picture:** the two races are shown side by side, each at the arcade's own 320 × 224.
 - **Controller:** the second player uses the controller in port B (or the next port with one), with the same
   controls.
-- **Sound:** player 1's music plays from both speakers. Each player's engine and effects come from their own
-  side: player 1 on the left, player 2 on the right.
+- **Sound:** player 1's music plays from both speakers (OPTIONS > 2P MUSIC chooses player 1's radio alone or
+  both). Each player's engine and effects come from their own side: player 1 on the left, player 2 on the
+  right.
 - **Detail:** large scenery is drawn at half resolution in this mode, so that two races fit in each frame.
 
 ## Time Attack ghosts
@@ -108,7 +120,7 @@ one from the VMU again.
 | A / B | Gear shift | A picks a line, B goes back |
 | Start | Start; pause a race | Pick a line |
 | Y | Music select | |
-| D-pad up / down | Previous / next music (every car can play all ten songs) | Move |
+| D-pad up / down | Previous / next music (every car can play all ten songs; the hidden Jingle Bell is on the way round, between Last Wave and Magical Sound Shower) | Move |
 | A + B + X + Y + Start | Soft reset: ends the game and goes back to the title | |
 
 The game runs on **free play**, so there's no coin button. A vibration pack shakes when the cabinet's wheel
@@ -140,9 +152,11 @@ without effort. A Dreamcast has a 200 MHz processor, 16 MB of memory and 8 MB of
 graphics and sound alone are more than the whole console holds. Most of this port is the work of fitting it in
 and keeping it at 60 frames a second:
 
-- **The picture isn't drawn in software.** The arcade board's tile planes and sprites become PowerVR textures
-  and quads each frame. Sprite textures are built, cached and thrown out as the scenery goes by, and 16-colour
-  textures share palettes, so one drawing serves every colour.
+- **The picture isn't drawn in software.** Most of the arcade board's tile planes are drawn cell by cell from
+  a store of the tiles' 16-colour graphics in video memory, with the PowerVR colouring them from its palette
+  memory, so a change of colours costs nothing. The sky and ground, whose lines scroll one by one, are kept as
+  textures, and only the cells that change are redone. Sprites are PowerVR textures, built, cached and thrown
+  out as the scenery goes by; 16-colour ones share palettes, so one drawing serves every colour.
 - **The data streams.** The graphics and samples stay compressed on the disc and are read in small pieces in
   the background while you play, so the race never waits for the disc.
 - **The sound board still runs.** The arcade's sound board (its own processor and sample chip) is still run,
@@ -205,6 +219,8 @@ If you find a bug, it's probably the robots. Report it anyway.
 
 ## Licence and credits
 
+- **Dreamcast port:** Pezz82. The OutRunners C reconstruction and the PC version are by Sebastian Toyos
+  (cheviman).
 - **Game code and port:** BSD 3-Clause, see [LICENSE](LICENSE). The upstream project is © Sebastian Toyos
   ([cheviman](https://github.com/cheviman)). Third-party licences inside the tree (for example
   `ports/sdl2/prompts/License.txt`) are unchanged.

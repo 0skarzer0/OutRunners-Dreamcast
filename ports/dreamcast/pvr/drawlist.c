@@ -628,9 +628,13 @@ void dl_overlay(const uint8_t *list, size_t size)
 	overlay_count = 0;
 	if (!list)
 		return;
+	static bool refused;    /* (a failed allocation is slow on the console: not asked again) */
 	for (int s = 0; s < 2; s++)
-		if (!overlay_list[s] && !(overlay_list[s] = malloc((DL_MAX_SPRITES + DL_OVERLAY_SPRITES) * sizeof(dl_sprite))))
+		if (!overlay_list[s] && (refused || !(overlay_list[s] = malloc((DL_MAX_SPRITES + DL_OVERLAY_SPRITES) * sizeof(dl_sprite)))))
+		{
+			refused = true;
 			return;
+		}
 	word_source = list;
 	word_source_size = size;
 	decode_into = overlay_sprites;
@@ -832,8 +836,12 @@ static void fog_pass(int screen)
 		if (slots[k].until >= n && !slots[k].many) any = true;
 	if (!any || !dl_fog_blend)
 		return;
-	if (!fog_list[screen] && !(fog_list[screen] = malloc((DL_MAX_SPRITES + FOG_SLOTS) * sizeof(dl_sprite))))
+	static bool refused[2];    /* (a failed allocation is slow on the console: not asked again) */
+	if (!fog_list[screen] && (refused[screen] || !(fog_list[screen] = malloc((DL_MAX_SPRITES + FOG_SLOTS) * sizeof(dl_sprite)))))
+	{
+		refused[screen] = true;
 		return;
+	}
 	/* the list again, the fog's sprites half see-through, the ones left out this frame put back where they were */
 	dl_sprite *out = fog_list[screen];
 	int count = 0;
@@ -1045,12 +1053,44 @@ uint16_t dl_plane_cell(int layer, int cx, int cy, int *bank)
 	return video_word((uint32_t)page << 9 | (uint32_t)(cy & 15) << 5 | (uint32_t)(cx & 31));
 }
 
+#ifdef DL_CHECK
+/* (host checks: the console's tile pages, 4 KiB of 32 tiles each, 32 of them unpacked (4 ways), and its 64
+   tiles unpacked to pens, as stream_media.c keeps them: the pages a frame has to inflate) */
+uint32_t dl_tile_page_misses;
+static uint32_t sim_tags[512], sim_stamps[512], sim_clock, sim_tiles[64], sim_slots = 32;
+static int sim_next;
+static void sim_tile(uint32_t index)
+{
+	static bool primed;
+	if (!primed) { primed = true; if (getenv("RT_SIM_PAGES")) sim_slots = (uint32_t)atoi(getenv("RT_SIM_PAGES")); for (int i = 0; i < 512; i++) sim_tags[i] = 0xffffffffu; for (int i = 0; i < 64; i++) sim_tiles[i] = 0xffffffffu; }
+	for (int i = 0; i < 64; i++) if (sim_tiles[i] == index) return;
+	sim_tiles[sim_next] = index; sim_next = (sim_next + 1) % 64;
+	const uint32_t page = index / 32u, base = (page % (sim_slots / 4u)) * 4u;
+	for (uint32_t w = 0; w < 4; w++) if (sim_tags[base + w] == page) { sim_stamps[base + w] = ++sim_clock; return; }
+	uint32_t slot = base;
+	for (uint32_t w = 1; w < 4; w++) if (sim_stamps[base + w] < sim_stamps[slot]) slot = base + w;
+	sim_tags[slot] = page; sim_stamps[slot] = ++sim_clock;
+	dl_tile_page_misses++;
+}
+#endif
+
 const uint8_t *dl_tile_pens(uint32_t tile)
 {
 	if (graphics.tile_count == 0)
 		return NULL;
 	const uint32_t index = tile % graphics.tile_count;
+#ifdef DL_CHECK
+	sim_tile(index % 32768u);
+#endif
 	return graphics.tile_at ? graphics.tile_at(index) : (graphics.tile_pens ? graphics.tile_pens[index] : NULL);
+}
+
+/* the text layer's map (64 x 32 words, little endian as video RAM keeps them) and its character bank */
+const uint16_t *dl_text_map(uint32_t *char_bank)
+{
+	const uint16_t control = video_register(0x5c);
+	*char_bank = control & 7u;
+	return (const uint16_t *)(const void *)&s32_board.video_ram[((uint32_t)((control >> 4) & 0x1f) << 11) * 2];
 }
 
 uint16_t dl_text_cell(int cx, int cy, uint32_t *character)

@@ -104,6 +104,14 @@ static void seat_inputs(const cont_state_t *pad, int seat, bool racing)
     if (pad->buttons & CONT_Y) input->port_b[seat] &= ~0x01;
     if (pad->buttons & CONT_DPAD_UP) input->port_b[seat] &= ~0x02;
     if (pad->buttons & CONT_DPAD_DOWN) input->port_b[seat] &= ~0x04;
+    {
+        /* the radio's << and >> through console_radio_buttons, as the PC version's: Jingle Bell on the way
+           round (between Last Wave and Magical Sound Shower), which the game plays for both pressed */
+        bool previous = (input->port_b[seat] & 0x02) == 0, next = (input->port_b[seat] & 0x04) == 0;
+        console_radio_buttons(seat, &previous, &next);
+        if (previous) input->port_b[seat] &= ~0x02;
+        if (next) input->port_b[seat] &= ~0x04;
+    }
 }
 #endif
 

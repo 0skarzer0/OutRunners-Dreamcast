@@ -304,7 +304,7 @@ static void (*real_sprites_due)(bool, bool);
    picture drops a frame, the speed and the sound hold. Never two in a row; after a long stall (a
    load) the schedule starts again. */
 volatile uint32_t dc_frames_skipped;
-volatile uint32_t dc_sound_us_total;
+volatile uint32_t dc_sound_us_total, dc_sound_end_us_total;
 /* The frame's picture: the left screen's, and with 2 PLAYERS the right one's beside it */
 static void dc_pvr_draw(void) {
     extern bool rt_ring_planes;
@@ -399,7 +399,8 @@ static void frame_callback(void) {
             time_sum[5] = frame_pass_us + sound_us;
         }
     }
-    dc_sound_us_total += (uint32_t)(frame_pass_us + sound_us);    /* (for the overlay: the sound board's time) */
+    dc_sound_us_total += (uint32_t)(frame_pass_us + sound_us);
+    dc_sound_end_us_total += (uint32_t)sound_us;    /* (of it: the chips' end of frame and the AICA) */    /* (for the overlay: the sound board's time) */
     frame_pass_us = frame_video_us = 0;
 #ifdef DC_PVR
     time_sum[6] += dc_pvr_wait_us;
