@@ -74,7 +74,18 @@ static void set_gate(void)
 	else if (sound_chips_next_deadline >= UINT64_MAX / 8)
 		z80.gate = UINT64_MAX;
 	else
-		z80.gate = z80_time(sound_chips_next_deadline);
+	{
+		/* (the deadline changes far less often than this runs, after every block: its 64-bit division,
+		   a library call on the SH4, is remembered) */
+		static uint64_t deadline = UINT64_MAX, gate;
+
+		if (sound_chips_next_deadline != deadline)
+		{
+			deadline = sound_chips_next_deadline;
+			gate = z80_time(deadline);
+		}
+		z80.gate = gate;
+	}
 }
 void sound_cpu_deadline_changed(void) { set_gate(); }
 

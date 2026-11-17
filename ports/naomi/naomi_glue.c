@@ -65,6 +65,7 @@ void dc_naomi_boot(void)
 		.every_second = every_second };
 
 	nk_boot(&config);
+	nk_watch_thread(NK_WATCH_ALL);    /* (the game runs in several threads: tasks_kos.c; profile.py samples them all) */
 	nk_cabinet_start_coin(6);
 }
 

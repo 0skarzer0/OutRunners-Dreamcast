@@ -22,7 +22,7 @@ CFLAGS += $(KOS_CFLAGS)
 CFLAGS += -fno-fast-math
 # as the Dreamcast build: the sound program runs, its samples are played by the AICA (aica_pcm.c)
 CFLAGS += -DS32_SOUND_SILENT
-CFLAGS += -DRT_BUILD_US=4000
+CFLAGS += -DRT_BUILD_US=5000
 # The arcade game as the cabinet has it (no ORUNNERS_CONSOLE: the PC version's menus are for a pad); its
 # coins, START and the cabinet's own test menu. The data from the NetDIMM; no VMU (the SRAM, later)
 CFLAGS += -DDC_NAOMI '-DDC_ASSETS="/dimm"' -DDC_NO_VMU

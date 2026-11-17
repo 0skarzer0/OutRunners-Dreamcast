@@ -1316,13 +1316,59 @@ static bool over_time(void)
    TA waiting for it. Three was one short: on the console, unlike the emulators, a render takes long
    enough for a new sprite's texels to land in a texture still on screen, drawing pieces of the wrong
    sprite). The entry being built was used this frame, so it is never taken. */
+#ifdef DC_NAOMI
+/* (the NAOMI: 4096 slots and a full video memory, so a frame may want many evictions, and each was a walk of
+   every slot: the oldest few are gathered by one walk and handed out in turn, each checked again then) */
+#define EVICT_BATCH 16
+static int evict_queue[EVICT_BATCH], evict_queued, evict_next;
+static uint32_t evict_last[EVICT_BATCH];
+
+static int evict_pick(void)
+{
+	while (evict_next < evict_queued)
+	{
+		const int i = evict_queue[evict_next];
+		const uint32_t last = evict_last[evict_next++];
+		if (cache[i].key && cache[i].last == last && cache[i].last + 4 < frame_no)
+			return i;
+	}
+	/* the EVICT_BATCH oldest in one walk, the oldest first */
+	evict_queued = evict_next = 0;
+	for (int i = 0; i < SP_SLOTS; i++)
+	{
+		if (!cache[i].key || cache[i].last + 4 >= frame_no)
+			continue;
+		const uint32_t last = cache[i].last;
+		int at = evict_queued < EVICT_BATCH ? evict_queued++ : EVICT_BATCH;
+		if (at == EVICT_BATCH)
+		{
+			if (last >= evict_last[EVICT_BATCH - 1]) continue;
+			at = EVICT_BATCH - 1;
+		}
+		while (at > 0 && evict_last[at - 1] > last)
+		{
+			evict_queue[at] = evict_queue[at - 1];
+			evict_last[at] = evict_last[at - 1];
+			at--;
+		}
+		evict_queue[at] = i;
+		evict_last[at] = last;
+	}
+	return evict_queued ? (evict_next = 1, evict_queue[0]) : -1;
+}
+#endif
+
 static bool evict_lru(void)
 {
 	rt_evictions++;
+#ifdef DC_NAOMI
+	const int victim = evict_pick();
+#else
 	int victim = -1;
 	for (int i = 0; i < SP_SLOTS; i++)
 		if (cache[i].key && cache[i].last + 4 < frame_no && (victim < 0 || cache[i].last < cache[victim].last))
 			victim = i;
+#endif
 	if (victim < 0) return false;
 	be->tex_free(cache[victim].tex);
 	if (cache[victim].shadow_tex >= 0) be->tex_free(cache[victim].shadow_tex);

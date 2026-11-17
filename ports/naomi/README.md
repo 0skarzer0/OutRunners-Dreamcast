@@ -23,7 +23,16 @@ off to the next frame). Next: raise the Dreamcast's limits with the NAOMI's memo
 | Samples | the fixed MiB as 4-bit ADPCM, the banked windows reloaded from pcm.bin on a bank change | the whole 4 MB ROM, 8-bit as it is, at sound RAM 0x200000 (above KallistiOS's 2 MB), every bank resident (`aica_pcm.c`) |
 | Textures | 1024 (`MAX_TEX`), 2048 sprites kept (`SP_SLOTS`, `FALLBACKS`) | 4096, 4096 |
 
-All under `DC_NAOMI`: the Dreamcast build is unchanged. Measured over 150 s on the board: 57-66 frames shown a
+Then (images 3 to 6): `RT_BUILD_US` 5000 (was 4000), evictions gathered 16 at a time (one walk of the 4096
+slots, not one a texture: `evict_pick`), and two savings found with naomi-kit's profiler (`NK_WATCH_ALL`: the game
+runs in tasks_kos.c's threads): `ram_outside` copies runs of the ROM (`data_span`) instead of searching every
+byte (3 % of the time), and `set_gate` keeps its 64-bit division until the deadline changes (2 %). The owner: sound
+right, less pop-in, one small stutter. Picture drops (`frames_skipped`, a frame not drawn so the game keeps its
+speed): about 1.8 a second unobserved; the Raspberry's reading itself costs the board time (3.9 a second while
+`live.py watch` reads every second), so measure with few reads.
+
+All under `DC_NAOMI` (or, for the runtime's two savings, the same results everywhere): the Dreamcast build is
+otherwise unchanged. Measured over 150 s on the board: 57-66 frames shown a
 second (none below 57; the Dreamcast build had seconds at 47-55 at a race's start), the video memory now filled
 and recycled (it had 3 MB left).
 
