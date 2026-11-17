@@ -1138,7 +1138,11 @@ static void emit_plane_direct(const dl_frame *f, int layer)
 
 /* ---- sprites ---- */
 
+#ifdef DC_NAOMI
+#define SP_SLOTS 4096    /* (the NAOMI: twice the video memory, and the room to keep twice the sprites built) */
+#else
 #define SP_SLOTS 2048
+#endif
 typedef struct sp_entry
 {
 	uint64_t key;
@@ -1185,7 +1189,11 @@ static int pow2(int v) { int p = 8; while (p < v) p <<= 1; return p; }
 /* The graphic a sprite shows, whatever its colours: its texture key without the palette. While a
    sprite's texture for new colours (or a new palette version) is not ready, the same graphic's last
    texture is drawn instead of nothing */
+#ifdef DC_NAOMI
+#define FALLBACKS 4096
+#else
 #define FALLBACKS 2048
+#endif
 static struct { uint64_t graphic, key; uint16_t slot; } fallback[FALLBACKS];
 
 static uint64_t graphic_key(const dl_sprite *s)

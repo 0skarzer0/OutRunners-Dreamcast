@@ -14,6 +14,19 @@ worst frame 19-33 ms, about 2.6 frames skipped a second (`frames_skipped`), 16.8
 memory left. The owner sees some pop-in of objects (the port's frame budget, `RT_BUILD_US`, puts far sprites
 off to the next frame). Next: raise the Dreamcast's limits with the NAOMI's memory and measure each step.
 
+## The NAOMI's memory used (image `ordc_naomi_2`, 2026-11-17)
+
+| | Dreamcast | NAOMI |
+|---|---|---|
+| Graphics | `tiles4.z`, `sprites.z` in RAM, pages inflated while playing (256 KiB and 1 MiB of them, up to 5 ms a page) | `tiles4.bin` (4 MB) and `sprites.bin` (16 MB) read whole at boot, every page its own slot (`zmedia_open_raw`): nothing inflated while playing; 4 MB of heap left |
+| Unpacked tiles | 256 | 2048 |
+| Samples | the fixed MiB as 4-bit ADPCM, the banked windows reloaded from pcm.bin on a bank change | the whole 4 MB ROM, 8-bit as it is, at sound RAM 0x200000 (above KallistiOS's 2 MB), every bank resident (`aica_pcm.c`) |
+| Textures | 1024 (`MAX_TEX`), 2048 sprites kept (`SP_SLOTS`, `FALLBACKS`) | 4096, 4096 |
+
+All under `DC_NAOMI`: the Dreamcast build is unchanged. Measured over 150 s on the board: 57-66 frames shown a
+second (none below 57; the Dreamcast build had seconds at 47-55 at a race's start), the video memory now filled
+and recycled (it had 3 MB left).
+
 ## What is different from the Dreamcast build
 
 | | Dreamcast | NAOMI |

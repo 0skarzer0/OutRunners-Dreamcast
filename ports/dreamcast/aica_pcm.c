@@ -77,6 +77,34 @@ static int load_file(const char *path, uint32_t *offset_out, uint32_t *size_out)
 	return 0;
 }
 
+#ifdef DC_NAOMI
+/* The NAOMI: its AICA has 8 MB. The whole sample ROM (pcm.bin, 4 MB of 8-bit) is copied once, above the 2 MB
+   KallistiOS's sound driver keeps, and every sample plays from it as it is: the fixed MiB and each banked
+   window's page where they are in the ROM. No ADPCM, no page reloads */
+#define NAOMI_PCM_BASE 0x200000u
+static bool naomi_pcm_loaded;
+
+static int naomi_load_pcm(const char *folder)
+{
+	char path[256];
+	static uint8_t chunk[32768] __attribute__((aligned(32)));
+
+	snprintf(path, sizeof(path), "%s/pcm.bin", folder);
+	FILE *fp = fopen(path, "rb");
+	if (!fp) return -1;
+	setvbuf(fp, NULL, _IONBF, 0);
+	uint32_t done = 0;
+	size_t n;
+	while (done < 4u * 1024u * 1024u && (n = fread(chunk, 1, sizeof(chunk), fp)) > 0)
+	{
+		spu_memload(NAOMI_PCM_BASE + done, chunk, (n + 3) & ~3u);
+		done += (uint32_t)n;
+	}
+	fclose(fp);
+	return done == 4u * 1024u * 1024u ? 0 : -1;
+}
+#endif
+
 int dc_aica_pcm_start(const char *folder)
 {
 	char path[256];
@@ -84,6 +112,20 @@ int dc_aica_pcm_start(const char *folder)
 
 	if (snd_init() < 0) return -1;
 	spu_master_mixer(15, 1);
+#ifdef DC_NAOMI
+	if (naomi_load_pcm(folder) != 0) return -2;
+	naomi_pcm_loaded = true;
+	(void)path; (void)size; (void)load_file;
+	for (int v = 0; v < VOICES; v++)
+	{
+		chan[v] = snd_sfx_chn_alloc();
+		if (chan[v] < 0) return -6;
+		reg0[v] = 0;
+		playing_window[v] = -1;
+	}
+	ready = true;
+	return 0;
+#endif
 	snprintf(path, sizeof(path), "%s/aica_fixed.bin", folder);
 	if (load_file(path, &fixed_base, &size) != 0) return -2;
 	snprintf(path, sizeof(path), "%s/aica_index.bin", folder);
@@ -291,6 +333,22 @@ static void key_on(int v, const multipcm_voice *voice)
 	const int ch = chan[v];
 	uint32_t sa, format;
 	const uint32_t start = voice->start & 0x1fffff;
+#ifdef DC_NAOMI
+	if (naomi_pcm_loaded)
+	{
+		/* (the ROM's place: the fixed MiB as it is, a window at its bank's page) */
+		uint32_t rom = start;
+		if (start >= 0x100000)
+		{
+			const int page = start >= 0x180000 ? ((s32_board.pcm_bank >> 3) & 7) : (s32_board.pcm_bank & 7);
+			rom = (uint32_t)page * PAGE + (start & 0x7ffffu);
+		}
+		sa = NAOMI_PCM_BASE + rom;
+		format = 1;                       /* 8-bit */
+		playing_window[v] = -1;
+	}
+	else
+#endif
 	if (start < 0x100000)
 	{
 		const stream_entry *e = find_stream(start);
@@ -378,8 +436,13 @@ void dc_aica_pcm_frame(const multipcm *chip)
 	/* windows follow the bank register even between key-ons */
 	/* (finished pieces into the cache each frame: one nobody asks for again would hold the loader) */
 	if (pcm_pages) dc_cache_pump(pcm_pages);
-	(void)ensure_page(0);
-	(void)ensure_page(1);
+#ifdef DC_NAOMI
+	if (!naomi_pcm_loaded)
+#endif
+	{
+		(void)ensure_page(0);
+		(void)ensure_page(1);
+	}
 	/* (for the capture: pieces loaded, and window 0's progress in 32 KiB pieces with its page) */
 	dc_aica_stats[7] = (uint32_t)dc_cache_pages_loaded(pcm_pages) | (window_done[0] >> 15) << 16 | (uint32_t)(window_loading[0] & 15) << 24;
 }

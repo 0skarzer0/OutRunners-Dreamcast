@@ -22,7 +22,11 @@
 #include <stdlib.h>
 #include <malloc.h>
 
+#ifdef DC_NAOMI
+#define MAX_TEX 4096    /* (the NAOMI's 16 MB of video memory hold far more textures than the Dreamcast's 1024) */
+#else
 #define MAX_TEX 1024
+#endif
 #define TEX_RESERVE (64 * 1024)      /* texture memory left to KOS beside the pool */
 /* (the board's 320 x 224 drawn 1:1 into the 320 x 240 video mode, which the video hardware doubles for
    the display: a quarter of the fill work of drawing it at 640 x 448, and the arcade's own pixels) */

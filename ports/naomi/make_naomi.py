@@ -11,7 +11,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent.parent
-FILES = ('core.assets', 'tiles4.z', 'sprites.z', 'pcm.bin', 'aica_fixed.bin', 'aica_index.bin')
+# (the NAOMI's RAM holds the graphics unpacked, and its AICA the samples as they are: no .z, no ADPCM)
+FILES = ('core.assets', 'tiles4.bin', 'sprites.bin', 'pcm.bin')
 
 
 def step(text):
@@ -52,25 +53,17 @@ def main():
     shutil.rmtree(work, ignore_errors=True)
     (work / 'dimm').mkdir(parents=True)
 
-    step('1/5 checking and extracting your ROM set')
+    step('1/4 checking and extracting your ROM set')
     (SRC / 'rom').mkdir(exist_ok=True)
     shutil.copy2(rom, SRC / 'rom' / 'orunners.zip')
     py(SRC / 'extract_assets.py', '--force', 'rom/orunners.zip', cwd=SRC)
 
-    step('2/5 packing the game\'s data')
+    step('2/4 packing the game\'s data')
     run([built('asset-probe'), SRC / 'assets', work / 'outrunners.assets'], stdout=subprocess.DEVNULL)
     py(SRC / 'tools/dreamcast/split_pack.py', work / 'outrunners.assets', work / 'split')
     py(SRC / 'tools/dreamcast/pack_tiles4.py', work / 'split/tiles.bin', work / 'split/tiles4.bin')
-    py(SRC / 'tools/dreamcast/pack_compressed.py', work / 'split/tiles4.bin', work / 'split/tiles4.z', '4096')
-    py(SRC / 'tools/dreamcast/pack_compressed.py', work / 'split/sprites.bin', work / 'split/sprites.z', '8192')
 
-    step('3/5 the samples for the sound chip')
-    encoder = work / 'aica_adpcm_encode'
-    run(['cc', '-O2', '-o', encoder, SRC / 'tools/dreamcast/aica_adpcm_encode.c', '-lm'])
-    py(SRC / 'tools/dreamcast/make_aica_pcm.py', work / 'split/pcm.bin', work / 'split',
-       env=dict(os.environ, AICA_ENCODER=str(encoder), AICA_DEPTH='4'))
-
-    step('4/5 the loading screen')
+    step('3/4 the loading screen')
     sys.path.insert(0, str(SRC / 'ports/dreamcast/dist'))
     import make_disc    # (its own step, with the paths of this tree)
     make_disc.SRC = SRC
@@ -80,7 +73,7 @@ def main():
     except SystemExit:
         print('   (no loading screen picture: the game starts all the same)')
 
-    step('5/5 the netboot image')
+    step('4/4 the netboot image')
     for f in FILES + ('splash.bin',):
         if (work / 'split' / f).exists():
             shutil.copy2(work / 'split' / f, work / 'dimm' / f)

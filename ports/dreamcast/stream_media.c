@@ -97,8 +97,29 @@ fail:
 	return -1;
 }
 
+#ifdef DC_NAOMI
+/* The NAOMI: the file unpacked whole (tiles4.bin, sprites.bin: the NetDIMM image has them so), read straight
+   into RAM, every page its own slot: no page is ever unpacked while the game runs (its 32 MB have room) */
+static int zmedia_open_raw(zmedia *z, const char *path, uint32_t page_size)
+{
+	memset(z, 0, sizeof(*z));
+	uint32_t size = 0;
+	z->file = read_whole(path, &size);
+	if (!z->file || size < page_size) { free(z->file); z->file = NULL; return -1; }
+	z->page_size = page_size; z->page_count = size / page_size; z->size = size;
+	z->slots = z->page_count; z->ways = 1;
+	z->payload = z->file;
+	z->tags = (uint32_t *)malloc(z->slots * sizeof(uint32_t));
+	z->stamps = (uint32_t *)calloc(z->slots, sizeof(uint32_t));
+	if (!z->tags || !z->stamps) { free(z->file); free(z->tags); free(z->stamps); memset(z, 0, sizeof(*z)); return -1; }
+	for (uint32_t i = 0; i < z->slots; i++) z->tags[i] = i;
+	return 0;
+}
+#endif
+
 static void zmedia_close(zmedia *z)
 {
+	if (z->payload == z->file) z->payload = NULL;    /* (a whole file: one buffer) */
 	free(z->file); free(z->payload); free(z->tags); free(z->stamps);
 	memset(z, 0, sizeof(*z));
 }
@@ -137,7 +158,11 @@ static const uint8_t *zmedia_page(zmedia *z, uint32_t page, bool may_unpack)
 
 /* tiles unpacked to a pen a byte, by the tile's number (one place each: no search). It was 64 tiles found
    by a search through all 64 for every cell drawn */
+#ifdef DC_NAOMI
+#define UNPACKED 2048    /* (512 KiB: the NAOMI has the room) */
+#else
 #define UNPACKED 256
+#endif
 static uint8_t s_unpacked[UNPACKED][256];
 static uint32_t s_unpacked_tile[UNPACKED];
 static uint8_t s_empty_tile[256];
@@ -242,10 +267,17 @@ int dc_media_open(const char *folder)
 	   (Tiles had 32 pages: a change of scenery wanted up to 18 pages inflated in one frame, each one eating
 	   the plane updates' time, and the ground at the screen's edges kept the last stage's tiles for frames.
 	   64 pages inflate a sixth as many over a race; host check: drawlist.c sim_tile) */
+#ifdef DC_NAOMI
+	snprintf(path, sizeof(path), "%s/tiles4.bin", folder);
+	if (zmedia_open_raw(&s_tiles, path, 4096) != 0) return -1;
+	snprintf(path, sizeof(path), "%s/sprites.bin", folder);
+	if (zmedia_open_raw(&s_sprites, path, 8192) != 0) { zmedia_close(&s_tiles); return -1; }
+#else
 	snprintf(path, sizeof(path), "%s/tiles4.z", folder);
 	if (zmedia_open(&s_tiles, path, 64, 4) != 0) return -1;
 	snprintf(path, sizeof(path), "%s/sprites.z", folder);
 	if (zmedia_open(&s_sprites, path, 128, 4) != 0) { zmedia_close(&s_tiles); return -1; }
+#endif
 	snprintf(path, sizeof(path), "%s/pcm.bin", folder);
 	s_pcm_cache = dc_cache_open_assoc(path, 8192, 8, 4);
 	if (!s_pcm_cache) { zmedia_close(&s_tiles); zmedia_close(&s_sprites); return -1; }
