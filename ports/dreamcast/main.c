@@ -35,7 +35,7 @@ static void test_actions_load(void) {
     static const char *const names[ACTIONS] = { "up", "down", "left", "right", "accept", "back", "start" };
     char line[96], name[32];
     unsigned long frame;
-    FILE *in = fopen("/cd/assets/actions.txt", "r");
+    FILE *in = fopen(DC_ASSETS "/actions.txt", "r");
     if (!in) return;
     while (fgets(line, sizeof(line), in) && test_action_count < TEST_ACTIONS) {
         if (line[0] == '#' || sscanf(line, "%lu %31s", &frame, name) != 2) continue;
@@ -440,6 +440,9 @@ static void frame_callback(void) {
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+#ifdef DC_NAOMI
+    dc_naomi_boot();    /* (ports/naomi: the console's log, /dimm, the Raspberry's live block) */
+#endif
     dc_startup_screen();    /* (credits, and the output: 240p or 480p) */
     if (dc_fault_install() != 0) {
         dc_status("fault handler setup failed");
@@ -453,7 +456,7 @@ int main(int argc, char **argv) {
     {
         extern volatile uint32_t dc_fault_pc, dc_exit_caller;
         static uint8_t buf[32768] __attribute__((aligned(32)));
-        int fd = open("/cd/assets/pcm.bin", O_RDONLY);
+        int fd = open(DC_ASSETS "/pcm.bin", O_RDONLY);
         if (fd >= 0) {
             uint64_t t = timer_us_gettime64();
             for (int i = 0; i < 32; i++) read(fd, buf, sizeof(buf));
@@ -467,7 +470,7 @@ int main(int argc, char **argv) {
 #endif
     dc_boot_stage = 1;
     dc_status("1/8 - loading core tables");
-    const char *err = assets_load_pack("/cd/assets/core.assets");
+    const char *err = assets_load_pack(DC_ASSETS "/core.assets");
     if (err) {
         dc_status("ERROR - asset load failed");
         fprintf(stderr, "Asset load failed: %s\n", err);
@@ -477,7 +480,7 @@ int main(int argc, char **argv) {
 
     dc_boot_stage = 2;
     dc_status("2/8 - opening streamed media");
-    if (dc_media_open("/cd/assets") != 0) {
+    if (dc_media_open(DC_ASSETS) != 0) {
         dc_status("ERROR - media open failed");
         fprintf(stderr, "Media open failed\n");
         thd_sleep(10000);
@@ -491,10 +494,10 @@ int main(int argc, char **argv) {
     s32_board.irq_changed = program_irq_line;
     {
         char error[128];
-        FILE *probe = fopen("/cd/assets/autoplay.txt", "r");
+        FILE *probe = fopen(DC_ASSETS "/autoplay.txt", "r");
         if (probe) {
             fclose(probe);
-            autoplay = s32_script_load("/cd/assets/autoplay.txt", error, sizeof(error));
+            autoplay = s32_script_load(DC_ASSETS "/autoplay.txt", error, sizeof(error));
         }
 #ifdef ORUNNERS_CONSOLE
         test_actions_load();
@@ -540,7 +543,7 @@ int main(int argc, char **argv) {
     sound_chips_attach();
     {
         /* the MultiPCM on the AICA (aica_pcm.c); without it the game runs silent */
-        const int aica = dc_aica_pcm_start("/cd/assets");
+        const int aica = dc_aica_pcm_start(DC_ASSETS);
         if (aica == 0)
             sound_chips_pcm_observer = dc_aica_pcm_written;
         else

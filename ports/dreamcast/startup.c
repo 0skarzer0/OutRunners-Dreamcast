@@ -51,7 +51,7 @@ static void centred(int y, const char *s)
 
 static bool load_splash(void)
 {
-	FILE *f = fopen("/cd/assets/splash.bin", "rb");
+	FILE *f = fopen(DC_ASSETS "/splash.bin", "rb");
 	if (!f) return false;
 	uint16_t head[4], size[2], road;
 	bool ok = fread(head, 2, 4, f) == 4 && memcmp(head, "ORSP", 4) == 0 && head[2] == SCREEN_W && head[3] == 224;

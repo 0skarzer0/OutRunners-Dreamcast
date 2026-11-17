@@ -4,6 +4,14 @@
 
 #include <stdbool.h>
 
+/* The folder of the data files: the disc's; another build (ports/naomi: the NetDIMM's /dimm) sets its own */
+#ifndef DC_ASSETS
+#define DC_ASSETS "/cd/assets"
+#endif
+#ifdef DC_NAOMI
+void dc_naomi_boot(void);    /* ports/naomi/naomi_glue.c */
+#endif
+
 void dc_controls_update(void);
 bool dc_exit_requested(void);
 void dc_exit_clear(void);    /* (the soft reset done) */

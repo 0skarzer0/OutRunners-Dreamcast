@@ -18,3 +18,4 @@ CLAUDE.md
 /ports/dreamcast/*.elf
 /ports/dreamcast/*.map
 /ports/dreamcast/*.bin
+ports/naomi/output/
