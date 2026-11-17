@@ -7,8 +7,12 @@ built for KallistiOS's **naomi** subarchitecture and booted from a NetDIMM. The 
 PowerVR2 and AICA, with twice the main RAM (32 MB), twice the video memory (16 MB) and four times the sound memory
 (8 MB): the same code runs, and the limits the Dreamcast set it can be raised step by step.
 
-**State (2026-11-17): built, not yet run on a board.** First stage: the Dreamcast port as it is, to measure it on
-the board before raising anything.
+**State (2026-11-17): runs on the board** (NAOMI 2 in a Crazy Taxi upright, image `ordc_naomi_1`): the
+cabinet's wheel, pedals, START and coin work; picture and sound right. Measured over 140 s of play with
+`live.py ADDR watch`: 59-63 frames shown a second nearly always (a few seconds at 47-57 at a race's start), the
+worst frame 19-33 ms, about 2.6 frames skipped a second (`frames_skipped`), 16.8 MB of heap and 3 MB of video
+memory left. The owner sees some pop-in of objects (the port's frame budget, `RT_BUILD_US`, puts far sprites
+off to the next frame). Next: raise the Dreamcast's limits with the NAOMI's memory and measure each step.
 
 ## What is different from the Dreamcast build
 
@@ -71,4 +75,5 @@ Port de Dreamcast de Pezz82 compilado para NAOMI (KallistiOS `naomi`) y arrancad
 cual (monedas, START, menú de test), los mandos del mueble con naomi-kit, los datos en `/dimm`, sin guardado aún y
 los textos de pantalla al log. Primera etapa: medirlo en la placa tal cual; después aprovechar la memoria extra de
 la NAOMI (todo en RAM sin caché de páginas, más memoria de vídeo para tiles y sprites, muestras sin comprimir).
-Compilado, **sin probar en placa** (2026-11-17).
+**Funciona en la placa** (2026-11-17): 59-63 fps casi siempre, volante, pedales, START y monedas bien; algo de
+«popping» de objetos. Siguiente: subir los límites de la Dreamcast con la memoria de la NAOMI.
