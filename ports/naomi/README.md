@@ -43,7 +43,7 @@ and recycled (it had 3 MB left).
 | The game | the PC version's menus (`ORUNNERS_CONSOLE`) | the arcade game as the cabinet has it: coins, START, the test menu |
 | Controls | a pad (`../dreamcast/input.c`) | the cabinet's JVS through [naomi-kit](https://github.com/0skarzer0/naomi-kit) (`naomi_input.c`): wheel, pedals, the two-position shifter, START (a press puts a coin in, the release is START), SERVICE, TEST, coins |
 | Data | the disc's `/cd/assets` | the NetDIMM's `/dimm` (naomi-kit's archive after the program) |
-| Saves | the VMU | none yet (`DC_NO_VMU`; the SRAM later) |
+| Saves | the VMU | the board's battery-backed SRAM (`naomi_save.c`): the EEPROM's settings and the kept sound-board RAM (records, bookkeeping, credits), at 0x1000-0x1FFF (naomi-kit's table), magic `ORUN`, written within a second of a change. Checked on the board: saved, and read back after a reboot. An original NAOMI game that uses the whole SRAM can overwrite it (then the board's defaults) |
 | Texts on the screen | the BIOS font | none (the NAOMI has no BIOS font): they go to the console's log, which the netbooter's Raspberry reads |
 | Live figures | the test overlay | naomi-kit's live block (`naomi_glue.c`): the port's own timings and the PowerVR's figures once a second |
 
@@ -94,8 +94,8 @@ NK_DIMM=10.0.0.4 python3 live.py ADDR watch 60   # frames shown a second, the wo
 ## Resumen en español
 
 Port de Dreamcast de Pezz82 compilado para NAOMI (KallistiOS `naomi`) y arrancado por NetDIMM: el juego arcade tal
-cual (monedas, START, menú de test), los mandos del mueble con naomi-kit, los datos en `/dimm`, sin guardado aún y
-los textos de pantalla al log. Primera etapa: medirlo en la placa tal cual; después aprovechar la memoria extra de
+cual (monedas, START, menú de test), los mandos del mueble con naomi-kit, los datos en `/dimm`, los récords y
+ajustes en la SRAM de la placa (0x1000-0x1FFF) y los textos de pantalla al log. Primera etapa: medirlo en la placa tal cual; después aprovechar la memoria extra de
 la NAOMI (todo en RAM sin caché de páginas, más memoria de vídeo para tiles y sprites, muestras sin comprimir).
 **Funciona en la placa** (2026-11-17): 59-63 fps casi siempre, volante, pedales, START y monedas bien; algo de
 «popping» de objetos. Siguiente: subir los límites de la Dreamcast con la memoria de la NAOMI.

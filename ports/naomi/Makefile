@@ -24,8 +24,8 @@ CFLAGS += -fno-fast-math
 CFLAGS += -DS32_SOUND_SILENT
 CFLAGS += -DRT_BUILD_US=5000
 # The arcade game as the cabinet has it (no ORUNNERS_CONSOLE: the PC version's menus are for a pad); its
-# coins, START and the cabinet's own test menu. The data from the NetDIMM; no VMU (the SRAM, later)
-CFLAGS += -DDC_NAOMI '-DDC_ASSETS="/dimm"' -DDC_NO_VMU
+# coins, START and the cabinet's own test menu. The data from the NetDIMM; the saves in the SRAM (naomi_save.c)
+CFLAGS += -DDC_NAOMI '-DDC_ASSETS="/dimm"'
 CFLAGS += -DS32_VIDEO_EXTRA_ELSEWHERE '-DORUNNERS_VERSION="0.4 NAOMI"' -I$(ROOT)/src
 DEPFLAGS = -MMD -MP
 
@@ -38,9 +38,9 @@ GAME_OBJS := $(patsubst $(ROOT)/src/%.c,$(BUILD)/game/%.o,$(GAME_SRCS))
 
 # the Dreamcast port's files, all but its controls (naomi_input.c here)
 DC_NAMES := main page_cache stream_media present fault_record aica_pcm pvr/drawlist pvr/render_emit \
-	pvr/pvr_backend pvr/vram_alloc vmu_save startup diag_screen workers_serial tasks_kos
+	pvr/pvr_backend pvr/vram_alloc startup diag_screen workers_serial tasks_kos
 DC_OBJS := $(addprefix $(BUILD)/dc/, $(addsuffix .o, $(DC_NAMES)))
-NAOMI_OBJS := $(BUILD)/naomi_input.o $(BUILD)/naomi_glue.o $(patsubst $(NAOMI_KIT)/src/%.c,$(BUILD)/kit/%.o,$(NAOMI_KIT_SOURCES))
+NAOMI_OBJS := $(BUILD)/naomi_input.o $(BUILD)/naomi_glue.o $(BUILD)/naomi_save.o $(patsubst $(NAOMI_KIT)/src/%.c,$(BUILD)/kit/%.o,$(NAOMI_KIT_SOURCES))
 
 ELF := $(BUILD)/outrunners-naomi.elf
 OBJS := $(DC_OBJS) $(NAOMI_OBJS) $(GAME_OBJS) $(RUNTIME_OBJS)
